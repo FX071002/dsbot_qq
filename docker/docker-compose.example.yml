@@ -1,0 +1,25 @@
+# 部署示例（片段，按你的实际环境改）
+#
+# 本项目的运行宿主是 **DeepSeek Harness 所在的容器**：插件必须装进 Harness 的
+# profile，控制台也建议与它同容器（插件通过 127.0.0.1 反代，且控制台进程由插件自愈拉起）。
+#
+# 1Panel 用户：直接在现有的 Harness 容器里跑 install.sh 即可，不需要下面的 compose。
+# 自建用户：下面是一个最小示例，镜像请换成你自己的 Harness 镜像。
+services:
+  harness:
+    image: <你的 DeepSeek Harness 镜像>
+    restart: always                # 关键：宿主重启后自动回来
+    ports:
+      - "10001:8443"               # 宿主 10001 → 容器内的入口（Caddy/HTTPS）
+    volumes:
+      - ./QQbot:/data/dsh/home/dfy-qqbot          # 本项目工作区（代码 + runtime 状态）
+      - ./data:/data/dsh                      # Harness 自己的数据（会话、profile、凭据）
+    environment:
+      # 首次安装时可在这里给凭据，install.sh 会写入插件补丁
+      QQ_BOT_APP_ID: ""
+      QQ_BOT_APP_SECRET: ""
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/qqbot/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 60s
+      timeout: 5s
+      retries: 3

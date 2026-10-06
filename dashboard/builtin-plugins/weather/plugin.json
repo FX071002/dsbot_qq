@@ -1,0 +1,23 @@
+{
+  "id": "weather",
+  "name": "天气查询",
+  "version": "1.0.0",
+  "author": "builtin",
+  "description": "发「/天气 城市」查询实时天气。数据来自 wttr.in 公共接口，不需要 API Key，也不消耗模型额度。",
+  "enabled": true,
+  "source": "builtin",
+  "prompt": "如果用户问天气但没说城市，先问清楚城市；用户也可以用 /天气 城市 直接快速查询。",
+  "commands": [
+    {
+      "label": "查询天气",
+      "pattern": "^/(天气|weather)\\s+(.{1,24})$",
+      "http": {
+        "url": "https://wttr.in/{2}?format=%l:+%c+%t+%w+%h&lang=zh",
+        "method": "GET",
+        "timeoutMs": 8000
+      },
+      "template": "🌤 {{body}}",
+      "maxChars": 400
+    }
+  ]
+}

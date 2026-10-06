@@ -1,0 +1,23 @@
+{
+  "id": "hitokoto",
+  "name": "一言",
+  "version": "1.0.0",
+  "author": "builtin",
+  "description": "发 /一言 随机返回一句中文句子（hitokoto 公共接口）。演示「HTTP + 模板」型插件：不需要 API Key，也不消耗模型额度。",
+  "enabled": true,
+  "source": "builtin",
+  "prompt": "",
+  "commands": [
+    {
+      "label": "随机一言",
+      "pattern": "^/(一言|hitokoto)$",
+      "http": {
+        "url": "https://v1.hitokoto.cn/?encode=text&max_length=60",
+        "method": "GET",
+        "timeoutMs": 6000
+      },
+      "template": "「{{body}}」",
+      "maxChars": 200
+    }
+  ]
+}

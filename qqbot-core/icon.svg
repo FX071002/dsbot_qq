@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="QQ Bot">
+  <rect x="1.5" y="3.5" width="29" height="21" rx="6" fill="#12B7F5"/>
+  <path d="M8 25.5h16l-4.5 4.5H12.5z" fill="#12B7F5"/>
+  <circle cx="11.5" cy="14" r="2.6" fill="#FFFFFF"/>
+  <circle cx="20.5" cy="14" r="2.6" fill="#FFFFFF"/>
+  <circle cx="11.5" cy="14" r="1.15" fill="#0B3A4A"/>
+  <circle cx="20.5" cy="14" r="1.15" fill="#0B3A4A"/>
+</svg>

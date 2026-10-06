@@ -1,0 +1,18 @@
+{
+  "id": "ping",
+  "name": "连通性测试",
+  "version": "1.0.0",
+  "author": "builtin",
+  "description": "发 /ping 立刻收到 pong。用来确认机器人链路是否活着，完全不消耗模型额度。",
+  "enabled": true,
+  "source": "builtin",
+  "prompt": "",
+  "commands": [
+    {
+      "label": "ping 测试",
+      "pattern": "^/ping$",
+      "template": "pong 🏓 机器人在线，链路正常。",
+      "maxChars": 100
+    }
+  ]
+}

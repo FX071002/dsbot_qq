@@ -1,0 +1,7 @@
+{
+  "appId": "你的 QQ 机器人 AppID",
+  "clientSecret": "你的 AppSecret",
+  "port": 9999,
+  "intents": 33554432,
+  "console": true
+}

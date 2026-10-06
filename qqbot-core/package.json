@@ -1,0 +1,30 @@
+{
+  "name": "@local/dsh-qqbot-core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "QQ 机器人服务：QQ 官方机器人桥接 + 自托管控制台（可独立运行，也可作为 DeepSeek Harness 插件运行）。",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "meta": {
+    "title": "QQ 机器人中枢",
+    "description": "把 DSH 接到 QQ 官方机器人，并提供控制台所需的运行时配置、人格、能力开关与第三方插件支持。"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

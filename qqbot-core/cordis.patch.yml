@@ -1,0 +1,18 @@
+# Bundle patch for @local/dsh-qqbot-core.
+#
+# Only deployment plumbing lives here: credentials, intents and paths. Every
+# setting an operator changes day to day lives in the runtime document
+# (runtime/qqbot.config.json) that the dashboard edits.
+#
+# install.sh fills the two credential fields from QQ_BOT_APP_ID /
+# QQ_BOT_APP_SECRET, or point them at environment variables with
+# appIdEnv / clientSecretEnv. Never commit real values.
+- insert:
+    - id: qqbot
+      name: '@local/dsh-qqbot-core'
+      config:
+        enabled: true
+        appId: ''
+        clientSecret: ''
+        # Everything else is derived from this directory.
+        home: '/data/dsh/home/dfy-qqbot'
