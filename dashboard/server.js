@@ -426,6 +426,11 @@ async function route(request, response, url) {
 
 const server = createServer((request, response) => {
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
+  // 挂载前缀只在"入口"那一层存在：反代/网关可能已经剥过一次，也可能没有。
+  // 这里统一剥掉，静态资源与 API 才落在同一套路径上。
+  if (BASE !== '' && (url.pathname === BASE || url.pathname.startsWith(`${BASE}/`))) {
+    url.pathname = url.pathname.slice(BASE.length) || '/'
+  }
   const { pathname } = url
 
   const fail = (error) => {
