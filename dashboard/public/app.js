@@ -3150,9 +3150,11 @@
   }
 
   /* 依赖式选择：换提供方时切到它的第一个模型，换模型时校正推理强度。
-     没有声明 reasoningEfforts 的模型保留原来的强度值，不写空字符串。 */
+     没有声明 reasoningEfforts 的模型保留原来的强度值，不写空字符串。
+     推理强度只有 chat 与 Harness 主干有，其余模型类型不写这个字段。 */
   function pickModelSelection(path, which, value) {
     if (!state.draft) return;
+    var withEffort = path === 'models.chat' || path === 'models.harness';
     var providers = catalogProviders();
     var selection = getPath(state.draft, path) || {};
     if (which === 'model-provider' || which === 'harness-provider' || which === 'kind-provider') {
@@ -3163,7 +3165,7 @@
       if (models.length > 0) {
         selection.model = models[0].id;
         var efforts = effortList(models[0]);
-        if (efforts.length > 0) selection.reasoningEffort = textOf(models[0].defaultEffort, efforts[0].id);
+        if (withEffort && efforts.length > 0) selection.reasoningEffort = textOf(models[0].defaultEffort, efforts[0].id);
       } else {
         selection.model = '';
       }
@@ -3174,7 +3176,7 @@
       });
       selection.model = value;
       var picked = pickEntry(all, value);
-      if (picked) {
+      if (withEffort && picked) {
         var list = effortList(picked);
         if (list.length > 0 && !pickEntry(list, selection.reasoningEffort)) {
           selection.reasoningEffort = textOf(picked.defaultEffort, list[0].id);

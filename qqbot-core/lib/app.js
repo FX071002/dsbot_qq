@@ -119,12 +119,6 @@ export async function mount(ctx, config) {
     side.write({ state: 'disabled' })
     return noop
   }
-  if (settings.appId === '' || settings.clientSecret === '') {
-    log('warn', '缺少 appId 或 clientSecret，服务保持待机（不会连接 QQ）')
-    side.write({ state: 'unconfigured' })
-    return noop
-  }
-
   mkdirSync(settings.runtimeDir, { recursive: true })
   mkdirSync(settings.pluginsDir, { recursive: true })
   mkdirSync(settings.mediaDir, { recursive: true })
@@ -152,6 +146,30 @@ export async function mount(ctx, config) {
   }
 
   let runtime = loadRuntime()
+
+  /**
+   * 生效凭据：控制台「连接」页保存的优先，其次才是插件行配置（环境变量 / 补丁）。
+   * 挂载时读一次，之后靠配置变更触发自我重载来生效。
+   */
+  const resolveCredential = (source) => {
+    const fromConsole = source?.qq ?? { appId: '', clientSecret: '' }
+    if (fromConsole.appId !== '' && fromConsole.clientSecret !== '') {
+      return { appId: fromConsole.appId, clientSecret: fromConsole.clientSecret, origin: '控制台「连接」页' }
+    }
+    if (settings.appId !== '' && settings.clientSecret !== '') {
+      return { appId: settings.appId, clientSecret: settings.clientSecret, origin: '插件行配置' }
+    }
+    return { appId: '', clientSecret: '', origin: '未配置' }
+  }
+
+  const credential = resolveCredential(runtime)
+  const credentialSignature = credential.appId === '' ? '' : `${credential.appId}:${credential.clientSecret}`
+  if (credentialSignature === '') {
+    log('warn', '尚无 QQ 凭据：请在控制台「连接」页填写 AppID 与 AppSecret（或用环境变量提供）')
+    side.write({ state: 'unconfigured' })
+    return noop
+  }
+  log('info', `使用${credential.origin}的凭据（AppID ${credential.appId}）`)
   let plugins = loadPlugins(settings.pluginsDir)
   let promptText = composePersonaPrompt(runtime, enabledPluginPrompts())
 
@@ -162,8 +180,8 @@ export async function mount(ctx, config) {
   // ------------------------------------------------------------- qq plumbing
 
   const api = new QQApi({
-    appId: settings.appId,
-    clientSecret: settings.clientSecret,
+    appId: credential.appId,
+    clientSecret: credential.clientSecret,
     baseUrl: settings.baseUrl,
     logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) }
   })
@@ -957,15 +975,35 @@ export async function mount(ctx, config) {
           models: entry.models.length,
           hasKey: entry.apiKey !== ''
         })),
+        qq: {
+          configured: credentialSignature !== "",
+          appId: credential.appId,
+          source: credential.origin
+        },
         liveAgents: agentDisposers.size
       }
     })
   }
 
   /** Adopt a new runtime document and push it everywhere. */
+  /** 配置变更后对齐凭据：变了就请求重载，让新挂载用上新凭据。 */
+  function syncCredentialSource(next) {
+    const wanted = resolveCredential(next)
+    const signature = wanted.appId === '' ? '' : `${wanted.appId}:${wanted.clientSecret}`
+    if (signature === credentialSignature) return
+    log('info', `「连接」页的凭据已变更，正在重载插件以生效（${wanted.origin}）`)
+    try {
+      writeFileSync(join(settings.runtimeDir, 'reload.request'), `${new Date().toISOString()}\n`)
+    } catch (error) {
+      log('warn', `写入重载请求失败：${error?.message ?? String(error)}`)
+    }
+  }
+
   function adoptRuntime(next, reason) {
     const previousRevision = runtime.revision
     runtime = next
+    // 启动时不必比较；运行期发现凭据变了就自我重载
+    if (reason !== "startup") syncCredentialSource(runtime)
     plugins = loadPlugins(settings.pluginsDir)
     promptText = composePersonaPrompt(runtime, enabledPluginPrompts())
     const touched = applyRuntimeToAgents()
