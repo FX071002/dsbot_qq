@@ -3,6 +3,7 @@ runtime/
 qqbot-status.json
 qqbot.log
 backup/
+dist/
 项目总结/
 plugins/
 node_modules/
