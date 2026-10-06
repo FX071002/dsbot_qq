@@ -335,7 +335,7 @@ export function normalizeRuntimeConfig(raw) {
  * @param pluginPrompts - `[{ name, prompt }]` from enabled plugins.
  * @returns the text injected as the `qqbot/deployment` section.
  */
-export function composePersonaPrompt(runtime, pluginPrompts = []) {
+export function composePersonaPrompt(runtime, pluginPrompts = [], knowledgeCatalog = '') {
   const persona = runtime.persona
   if (persona.useCustom && persona.custom.trim() !== '') return persona.custom.trim()
   const parts = [BASE_DEPLOYMENT_PROMPT]
@@ -347,6 +347,10 @@ export function composePersonaPrompt(runtime, pluginPrompts = []) {
     if (typeof plugin?.prompt === 'string' && plugin.prompt.trim() !== '') {
       parts.push(`【已启用插件：${plugin.name ?? '未命名'}】\n${plugin.prompt.trim()}`)
     }
+  }
+  // 知识库目录放在最后：它只是"手边有哪些资料"，优先级低于上面的人格与规则。
+  if (typeof knowledgeCatalog === 'string' && knowledgeCatalog.trim() !== '') {
+    parts.push(knowledgeCatalog.trim())
   }
   return parts.join('\n\n')
 }

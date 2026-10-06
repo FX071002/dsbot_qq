@@ -19,6 +19,20 @@ import { dirname, extname, join, normalize } from 'node:path'
 import { networkInterfaces, hostname, platform, totalmem, freemem, uptime } from 'node:os'
 
 import {
+  MAX_UPLOAD_BYTES,
+  SUPPORTED_FORMATS,
+  addFile,
+  addFolder,
+  readEntryText,
+  readIndex,
+  removeEntry,
+  resolveKnowledgePaths,
+  search as searchKnowledge,
+  statsOf,
+  writeIndex
+} from '../shared/knowledge.js'
+
+import {
   IMAGE_PROVIDER_PRESETS,
   PERSONA_PRESETS,
   VERSION,
@@ -60,6 +74,7 @@ const RAW_BASE = flag('base', process.env.QQBOT_BASE ?? '')
 const BASE =
   RAW_BASE === '' || RAW_BASE === '/' ? '' : `/${RAW_BASE.replace(/^\/+|\/+$/g, '')}`
 const paths = resolvePaths(HOME, dirname(fileURLToPath(import.meta.url)))
+const kbPaths = resolveKnowledgePaths(HOME)
 const COOKIE = 'qqbot_session'
 const auth = openAuth(paths, {
   warn: (message) => console.warn(`[dashboard] ${message}`)
@@ -120,6 +135,25 @@ function sendIndex(response) {
     .replace('</head>', `<script>window.__QQBOT_BASE__=${JSON.stringify(BASE)}</script></head>`)
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' })
   response.end(rendered)
+}
+
+/** 读原始请求体（文件上传用），返回 Buffer。 */
+function readBinary(request, limit = MAX_UPLOAD_BYTES) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    request.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(Object.assign(new Error(`文件超过 ${(limit / 1024 / 1024).toFixed(0)} MB 上限`), { statusCode: 413 }))
+        request.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    request.on('end', () => resolve(Buffer.concat(chunks)))
+    request.on('error', reject)
+  })
 }
 
 function readBody(request, limit = 1_048_576) {
@@ -324,7 +358,8 @@ async function route(request, response, url) {
       'reload-config': 'reload-config',
       'test-model': 'test-model',
       'discover-models': 'discover-models',
-      'test-harness': 'test-harness'
+      'test-harness': 'test-harness',
+      'test-knowledge': 'test-knowledge'
     }
     if (bridged[action] !== undefined) {
       const result = await control(paths, bridged[action], body.payload)
@@ -415,6 +450,83 @@ async function route(request, response, url) {
     return sendJson(response, 200, result)
   }
 
+  if (pathname === '/api/knowledge' && method === 'GET') {
+    const index = readIndex(kbPaths)
+    return sendJson(response, 200, {
+      index,
+      revision: index.revision,
+      stats: statsOf(index),
+      formats: SUPPORTED_FORMATS,
+      maxUploadBytes: MAX_UPLOAD_BYTES
+    })
+  }
+  if (pathname === '/api/knowledge' && method === 'PUT') {
+    const body = await readBody(request)
+    try {
+      const next = writeIndex(kbPaths, body.index ?? {}, body.revision)
+      audit(paths, `knowledge saved → revision ${next.revision}`)
+      return sendJson(response, 200, { ok: true, revision: next.revision })
+    } catch (error) {
+      if (error?.code === 'REVISION_CONFLICT') {
+        return sendJson(response, 409, { error: error.message, revision: error.revision })
+      }
+      throw error
+    }
+  }
+  if (pathname === '/api/knowledge/upload' && method === 'POST') {
+    const name = String(url.searchParams.get('name') ?? '').trim()
+    if (name === '') return sendJson(response, 400, { error: '缺少文件名' })
+    const buffer = await readBinary(request)
+    if (buffer.length === 0) return sendJson(response, 400, { error: '文件是空的' })
+    const result = addFile(kbPaths, {
+      name,
+      buffer,
+      title: String(url.searchParams.get('title') ?? ''),
+      description: String(url.searchParams.get('description') ?? ''),
+      parent: String(url.searchParams.get('parent') ?? '')
+    })
+    audit(paths, `knowledge upload "${result.entry.title}" (${buffer.length} bytes, ${result.entry.chars} chars)`)
+    return sendJson(response, 200, { ok: true, entry: result.entry, revision: result.index.revision })
+  }
+  if (pathname === '/api/knowledge/folder' && method === 'POST') {
+    const body = await readBody(request)
+    const result = addFolder(kbPaths, { title: body.title, parent: body.parent, description: body.description })
+    audit(paths, `knowledge folder "${result.entry.title}"`)
+    return sendJson(response, 200, { ok: true, entry: result.entry, revision: result.index.revision })
+  }
+  if (pathname === '/api/knowledge/delete' && method === 'POST') {
+    const body = await readBody(request)
+    const id = String(body.id ?? '')
+    if (id === '') return sendJson(response, 400, { error: '缺少 id' })
+    const index = removeEntry(kbPaths, id)
+    audit(paths, `knowledge delete ${id}`)
+    return sendJson(response, 200, { ok: true, revision: index.revision })
+  }
+  if (pathname === '/api/knowledge/text' && method === 'GET') {
+    const id = String(url.searchParams.get('id') ?? '')
+    const limit = Number(url.searchParams.get('limit') ?? '20000')
+    const index = readIndex(kbPaths)
+    const hit = readEntryText(kbPaths, index, id, Number.isFinite(limit) && limit > 0 ? limit : 20000)
+    if (hit === undefined) return sendJson(response, 404, { error: '没有这个条目' })
+    return sendJson(response, 200, {
+      ok: true,
+      id,
+      title: hit.entry.title,
+      kind: hit.entry.kind,
+      text: hit.text,
+      truncated: hit.truncated,
+      chars: hit.entry.chars ?? hit.text.length,
+      images: hit.entry.images ?? [],
+      warning: hit.entry.warning ?? null
+    })
+  }
+  if (pathname === '/api/knowledge/search' && method === 'GET') {
+    const query = String(url.searchParams.get('q') ?? '').trim()
+    const limit = Number(url.searchParams.get('limit') ?? '8')
+    const index = readIndex(kbPaths)
+    const results = query === '' ? [] : searchKnowledge(kbPaths, index, query, Number.isFinite(limit) && limit > 0 ? limit : 8)
+    return sendJson(response, 200, { ok: true, query, results })
+  }
   if (pathname === '/api/meta' && method === 'GET') {
     return sendJson(response, 200, { personaPresets: PERSONA_PRESETS, imagePresets: IMAGE_PROVIDER_PRESETS, version: VERSION })
   }
@@ -448,6 +560,16 @@ const server = createServer((request, response) => {
         return sendJson(response, 400, { error: 'bad media path' })
       }
       return sendFile(response, join(paths.mediaDir, name), { cache: true })
+    }
+    // 知识库里抽出来的图片：和 /media/ 一样不鉴权，QQ 的服务器要能直接拉。
+    if (pathname.startsWith('/kb-media/')) {
+      const name = normalize(pathname.slice('/kb-media/'.length))
+      if (name.includes('/') || name.includes('..') || name === '') {
+        return sendJson(response, 400, { error: 'bad media path' })
+      }
+      const file = join(kbPaths.mediaDir, name)
+      if (!existsSync(file)) return sendJson(response, 404, { error: '没有这张图' })
+      return sendFile(response, file, { cache: true })
     }
     if (pathname.startsWith('/api/') || pathname === '/healthz') {
       route(request, response, url).catch(fail)

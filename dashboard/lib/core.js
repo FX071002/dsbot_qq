@@ -65,7 +65,13 @@ export function resolvePaths(home, codeDir) {
     reloadFile: join(runtimeDir, 'reload.request'),
     statusFile: join(root, 'qqbot-status.json'),
     logFile: join(root, 'qqbot.log'),
-    authFile: join(runtimeDir, 'dashboard.auth.json')
+    authFile: join(runtimeDir, 'dashboard.auth.json'),
+    // 知识库：目录 + 原件 + 抽出的文本 + 抽出的图片
+    kbRoot: join(runtimeDir, 'knowledge'),
+    kbIndexFile: join(runtimeDir, 'knowledge', 'index.json'),
+    kbFilesDir: join(runtimeDir, 'knowledge', 'files'),
+    kbTextDir: join(runtimeDir, 'knowledge', 'text'),
+    kbMediaDir: join(runtimeDir, 'knowledge', 'media')
   }
 }
 

@@ -1695,6 +1695,317 @@ code {
   max-width: 260px;
 }
 
+/* -------------------------------- 知识库 -------------------------------- */
+/* 顶部一行：上传 / 新建分类 / 上传目标分类 / 搜索 */
+.kb-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 上传按钮其实是个 label，真正的 file 控件藏起来 */
+.kb-upload {
+  cursor: pointer;
+}
+
+.kb-file {
+  display: none;
+}
+
+.kb-parent-select {
+  max-width: 190px;
+}
+
+.kb-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 190px;
+  min-width: 150px;
+}
+
+.kb-search .input {
+  flex: 1 1 130px;
+  width: auto;
+  min-width: 100px;
+}
+
+/* 目录树：一行 = order 输入 + ↑↓、标题/描述/字数、行尾按钮 */
+.kb-tree {
+  display: flex;
+  flex-direction: column;
+}
+
+.kb-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 9px 0;
+}
+
+.kb-row + .kb-row {
+  border-top: 1px solid var(--border);
+}
+
+/* 分类下的条目缩进一级 */
+.kb-row-child {
+  padding-left: 26px;
+}
+
+.kb-row.is-open {
+  background: var(--panel-2);
+  border-radius: var(--radius-sm);
+}
+
+.kb-order {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 比 .input[type="number"] 更具体，否则 max-width 会被它压回去 */
+.input.kb-order-input {
+  width: 58px;
+  max-width: 58px;
+  padding: 4px 6px;
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.kb-move {
+  padding: 2px 6px;
+  min-width: 24px;
+}
+
+.kb-main {
+  min-width: 0;
+}
+
+.kb-title-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.kb-title {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.kb-title:hover {
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+
+.kb-desc {
+  font-size: 12.5px;
+  color: var(--text-soft);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.kb-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.kb-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.kb-foot {
+  padding-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 行内编辑：横跨整行 */
+.kb-edit {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  padding: 12px 12px 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.kb-edit-grid {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.kb-edit-grid .field {
+  flex: 1 1 190px;
+  margin-bottom: 10px;
+}
+
+.kb-edit-grid .field:last-child {
+  flex: 0 1 130px;
+}
+
+.kb-edit .field {
+  margin-bottom: 10px;
+}
+
+.kb-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.kb-edit .form-error {
+  margin-top: 6px;
+  padding-bottom: 6px;
+}
+
+/* 预览面板：列表下方展开 */
+.kb-preview {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.kb-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.kb-preview-head h3 {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.kb-preview-body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.kb-text {
+  margin: 0;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.kb-preview .hint-box {
+  margin: 0 12px 12px;
+}
+
+/* 抽取出的图片缩略图 */
+.kb-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.kb-image {
+  display: block;
+  width: 96px;
+  height: 96px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.kb-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 搜索结果 */
+.kb-result {
+  padding: 9px 0;
+}
+
+.kb-result + .kb-result {
+  border-top: 1px solid var(--border);
+}
+
+.kb-result-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.kb-snippet {
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.kb-snippet mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.kb-empty .hint-box {
+  margin-top: 0;
+}
+
+@media (max-width: 820px) {
+  .kb-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .kb-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .kb-toolbar {
+    justify-content: flex-start;
+  }
+}
+
 /* -------------------------------- 响应式 -------------------------------- */
 @media (max-width: 1080px) {
   .stats {

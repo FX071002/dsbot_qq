@@ -31,6 +31,7 @@ import { QQApi } from '../qqbot-core/lib/qq-api.js'
 import { QQGateway } from '../qqbot-core/lib/qq-gateway.js'
 import { SideChannel } from '../qqbot-core/lib/status.js'
 import { composePersonaPrompt, defaultRuntimeConfig, describePersona, normalizeRuntimeConfig } from '../shared/runtime.js'
+import { composeCatalog, readEntryText, readIndex, resolveKnowledgePaths, search as searchKnowledge, statsOf } from '../shared/knowledge.js'
 import { loadPlugins, matchCommand, runCommand } from '../shared/plugins.js'
 import { generateImage, saveImage } from '../shared/image.js'
 import { ChatClient, History } from './lib/chat.js'
@@ -105,7 +106,19 @@ const log = (level, message) => side.line(level, message)
 
 let runtime = loadRuntime(settings.configFile, log)
 let plugins = loadPlugins(settings.pluginsDir)
-let promptText = composePersonaPrompt(runtime, plugins.filter((p) => p.enabled && p.error === undefined))
+const kbPaths = resolveKnowledgePaths(settings.home)
+
+/** 读知识库目录并生成给模型的目录段落（每次配置变更时刷新）。 */
+function knowledgeCatalog() {
+  try {
+    return composeCatalog(readIndex(kbPaths))
+  } catch (error) {
+    log('warn', `读取知识库目录失败：${error?.message ?? String(error)}`)
+    return ''
+  }
+}
+
+let promptText = composePersonaPrompt(runtime, plugins.filter((p) => p.enabled && p.error === undefined), knowledgeCatalog())
 
 /** QQ OpenAPI 客户端：凭据变化时整体重建。 */
 let api = new QQApi({
@@ -156,57 +169,168 @@ function isAdmitted(scene, senderOpenid, groupOpenid) {
 }
 
 /** 带函数调用的补全（失败自动退回普通对话）。 */
+/** 知识库工具的定义（只在知识库非空时提供给模型）。 */
+function knowledgeTools() {
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'kb_list',
+        description: '列出本机知识库的目录（分类、标题、说明与条目 id）。不确定该查哪一篇时先调用它。',
+        parameters: { type: 'object', properties: {} }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'kb_search',
+        description: '在本机知识库里按关键词检索，返回命中的条目与片段。需要查具体数据/设定的第一步。',
+        parameters: {
+          type: 'object',
+          properties: { query: { type: 'string', description: '关键词，例如单位名、技能名、术语' } },
+          required: ['query']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'kb_read',
+        description: '读取知识库里某个条目的正文。拿到 id 后用它读全文，不要凭记忆回答资料里的数据。',
+        parameters: {
+          type: 'object',
+          properties: { id: { type: 'string', description: 'kb_list / kb_search 返回的条目 id，例如 k2' } },
+          required: ['id']
+        }
+      }
+    }
+  ]
+}
+
+/** 知识库里有没有内容（没有就不必给模型这些工具）。 */
+function hasKnowledge() {
+  try {
+    return statsOf(readIndex(kbPaths)).entries > 0
+  } catch {
+    return false
+  }
+}
+
+/** 执行一次知识库工具调用。 */
+function runKnowledgeTool(name, args) {
+  try {
+    const index = readIndex(kbPaths)
+    if (name === 'kb_list') {
+      const catalog = composeCatalog(index, { maxEntries: 80 })
+      return catalog === '' ? '知识库是空的。' : catalog
+    }
+    if (name === 'kb_search') {
+      const query = String(args?.query ?? '').trim()
+      if (query === '') return '没有提供关键词。'
+      const results = searchKnowledge(kbPaths, index, query, 6)
+      if (results.length === 0) return `知识库里没有匹配「${query}」的内容。可以换个说法，或用 kb_list 看目录。`
+      return results
+        .map((hit) => `【${hit.title}】（id=${hit.id}，相关度 ${hit.score}）\n${hit.snippet}`)
+        .join('\n\n')
+    }
+    if (name === 'kb_read') {
+      const id = String(args?.id ?? '').trim()
+      const hit = readEntryText(kbPaths, index, id, 20000)
+      if (hit === undefined) return `知识库里没有 id=${id} 的条目。用 kb_list 看可用 id。`
+      if (hit.entry.kind === 'folder') return `${id} 是一个分类，用 kb_list 看它下面的条目。`
+      if (hit.text.trim() === '') return `《${hit.entry.title}》没有可读文本${hit.entry.warning === undefined ? '' : `（${hit.entry.warning}）`}。`
+      const images = (hit.entry.images ?? []).length === 0 ? '' : `\n\n（这份资料还带 ${hit.entry.images.length} 张图，路径：${hit.entry.images.map((name) => `/kb-media/${name}`).join('、')}）`
+      return `《${hit.entry.title}》全文${hit.truncated ? '（已截断）' : ''}：\n${hit.text}${images}`
+    }
+  } catch (error) {
+    return `知识库读取失败：${error?.message ?? String(error)}`
+  }
+  return `未知工具 ${name}`
+}
+
+/**
+ * 让模型回答一轮，必要时走函数调用。
+ *
+ * 提供给模型的工具有两类：生图（qq_send_image）与知识库（kb_list / kb_search / kb_read）。
+ * 任何一轮失败都会退回普通对话，保证机器人不会因为工具不可用而哑掉。
+ */
 async function replyWithModel(messages, onImage) {
   const image = runtime.capabilities.image
-  if (!(runtime.capabilities.tools && image.enabled)) {
-    return { text: await chat.complete(messages), imageError: undefined }
-  }
+  const wantImage = runtime.capabilities.tools && image.enabled
+  const wantKnowledge = runtime.capabilities.tools && hasKnowledge()
+  if (!wantImage && !wantKnowledge) return { text: await chat.complete(messages), imageError: undefined }
+
   const route = chat.resolveRoute()
   if (route === undefined) return { text: await chat.complete(messages), imageError: undefined }
-  try {
+
+  const tools = []
+  if (wantImage) {
+    tools.push({
+      type: 'function',
+      function: {
+        name: 'qq_send_image',
+        description: '根据文字描述生成一张图片并直接发送到当前 QQ 会话。用户要求画图/生成图片时调用。',
+        parameters: { type: 'object', properties: { prompt: { type: 'string', description: '画面描述' } }, required: ['prompt'] }
+      }
+    })
+  }
+  if (wantKnowledge) tools.push(...knowledgeTools())
+
+  const callModel = async (conversation) => {
     const response = await fetch(`${route.baseURL}/chat/completions`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         ...(route.apiKey === '' ? {} : { authorization: `Bearer ${route.apiKey}` })
       },
-      body: JSON.stringify({
-        model: route.model,
-        messages,
-        tools: [
-          {
-            type: 'function',
-            function: {
-              name: 'qq_send_image',
-              description: '根据文字描述生成一张图片并直接发送到当前 QQ 会话。用户要求画图/生成图片时调用。',
-              parameters: {
-                type: 'object',
-                properties: { prompt: { type: 'string', description: '画面描述' } },
-                required: ['prompt']
-              }
-            }
-          }
-        ]
-      })
+      body: JSON.stringify({ model: route.model, messages: conversation, tools })
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const payload = await response.json()
-    const message = payload?.choices?.[0]?.message
-    const toolCall = message?.tool_calls?.[0]
-    if (toolCall === undefined) return { text: typeof message?.content === 'string' ? message.content : '', imageError: undefined }
-    const args = JSON.parse(toolCall.function?.arguments ?? '{}')
-    const outcome = await onImage(String(args.prompt ?? ''))
-    const followUp = [
-      ...messages,
-      { role: 'assistant', content: message.content ?? '', tool_calls: message.tool_calls },
-      { role: 'tool', tool_call_id: toolCall.id, content: outcome.ok ? '图片已发送' : `发送失败：${outcome.error}` }
-    ]
-    return { text: await chat.complete(followUp), imageError: outcome.ok ? undefined : outcome.error }
+    return await response.json()
+  }
+
+  try {
+    const conversation = [...messages]
+    let imageError
+    // 最多四轮工具调用：读目录 → 检索 → 读正文 → 收尾
+    for (let round = 0; round < 4; round += 1) {
+      const payload = await callModel(conversation)
+      const message = payload?.choices?.[0]?.message
+      if (message === undefined) break
+      const calls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+      if (calls.length === 0) {
+        return { text: typeof message.content === 'string' ? message.content : '', imageError }
+      }
+      conversation.push({ role: 'assistant', content: message.content ?? '', tool_calls: message.tool_calls })
+      for (const call of calls) {
+        const name = String(call.function?.name ?? '')
+        let args = {}
+        try {
+          args = JSON.parse(call.function?.arguments ?? '{}')
+        } catch {
+          args = {}
+        }
+        let output
+        if (name === 'qq_send_image') {
+          const outcome = await onImage(String(args.prompt ?? ''))
+          if (outcome.ok !== true) imageError = outcome.error
+          output = outcome.ok ? '图片已发送' : `发送失败：${outcome.error}`
+        } else {
+          output = runKnowledgeTool(name, args)
+        }
+        log('info', `模型调用了工具 ${name}`)
+        globalThis.__kbToolCalls = [...(globalThis.__kbToolCalls ?? []), name]
+        conversation.push({ role: 'tool', tool_call_id: call.id, content: output })
+      }
+    }
+    // 工具轮次用尽：用已经拿到的上下文再问一次，别让用户等空
+    return { text: await chat.complete(conversation), imageError }
   } catch (error) {
     log('warn', `函数调用不可用，退回普通对话：${error?.message ?? String(error)}`)
     return { text: await chat.complete(messages), imageError: undefined }
   }
 }
+
 
 /** 处理一条 QQ 消息。 */
 async function onMessage(event) {
@@ -330,7 +454,7 @@ async function onLifecycle(event) {
 function adoptRuntime(next, reason) {
   runtime = next
   plugins = loadPlugins(settings.pluginsDir)
-  promptText = composePersonaPrompt(runtime, plugins.filter((p) => p.enabled && p.error === undefined))
+  promptText = composePersonaPrompt(runtime, plugins.filter((p) => p.enabled && p.error === undefined), knowledgeCatalog())
   chat.use(runtime)
   syncCredential(reason === 'startup' ? 'startup' : 'runtime')
   publishStatus()
@@ -417,6 +541,19 @@ async function handleControl(request) {
       })
       ok = outcome.ok
       message = outcome.message
+    } else if (action === 'test-knowledge') {
+      const question = String(request?.payload?.question ?? '').trim() || '你好，介绍一下你能查到的资料'
+      const before = []
+      const messages = [{ role: 'system', content: promptText }, { role: 'user', content: question }]
+      const outcome = await replyWithModel(messages, async () => ({ ok: false, error: '本次测试不发送图片' }))
+      const hits = globalThis.__kbToolCalls ?? []
+      for (const name of hits) before.push(name)
+      globalThis.__kbToolCalls = []
+      ok = outcome.text.trim() !== ''
+      message = outcome.text.trim() === ''
+        ? '模型没有返回内容'
+        : `${before.length === 0 ? '（模型没有调用知识库工具）' : `调用了 ${before.join('、')}；`}回答：${outcome.text.trim().slice(0, 400)}`
+      payload = { tools: before }
     } else if (action === 'reload-config') {
       adoptRuntime(loadRuntime(settings.configFile, log), 'control')
       message = `已重新读取运行时配置（revision=${runtime.revision}）`

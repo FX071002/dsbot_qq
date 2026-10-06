@@ -10,7 +10,7 @@
 
   var VERSION = '1.0.0';
   var LOG_REFRESH_MS = 5000;
-  var ROUTES = ['connect', 'overview', 'bot', 'persona', 'capabilities', 'models', 'harness', 'plugins', 'logs'];
+  var ROUTES = ['connect', 'overview', 'bot', 'persona', 'capabilities', 'models', 'kb', 'harness', 'plugins', 'logs'];
 
   var BRIDGE_STATES = {
     online: { label: '在线', tone: 'ok' },
@@ -30,6 +30,10 @@
   };
 
   var LEVELS = ['info', 'warn', 'error', 'raw'];
+
+  /* 知识库页：后端没给 formats 时的兜底上传格式，以及预览一次读取的最大字符数（与 /api/knowledge/text 的 limit 一致）。 */
+  var KB_FALLBACK_FORMATS = ['txt', 'md', 'csv', 'ini', 'json', 'log', 'docx', 'xlsx', 'pptx'];
+  var KB_TEXT_LIMIT = 20000;
 
   /* 与 bridge/lib/runtime.js 的 BASE_DEPLOYMENT_PROMPT 保持一致。 */
   var BASE_DEPLOYMENT_PROMPT = [
@@ -163,6 +167,7 @@
       title: '扩展',
       items: [
         { id: 'models', label: '模型', icon: 'chip' },
+        { id: 'kb', label: '知识库', icon: 'book' },
         { id: 'harness', label: 'Harness 服务', icon: 'server' },
         { id: 'plugins', label: '插件', icon: 'puzzle' }
       ]
@@ -176,6 +181,7 @@
     user: '<circle cx="12" cy="8.2" r="3.4"/><path d="M5.2 20a6.8 6.8 0 0 1 13.6 0"/>',
     sliders: '<path d="M4 7.5h9"/><path d="M17.5 7.5H20"/><circle cx="15.2" cy="7.5" r="2.2"/><path d="M4 16.5h5"/><path d="M13.5 16.5H20"/><circle cx="11.2" cy="16.5" r="2.2"/>',
     chip: '<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10.5 3.5v3.5M13.5 3.5v3.5M10.5 17v3.5M13.5 17v3.5M3.5 10.5H7M3.5 13.5H7M17 10.5h3.5M17 13.5h3.5"/>',
+    book: '<path d="M4.8 5.4A1.9 1.9 0 0 1 6.7 3.5h4.4v14.6H6.7a1.9 1.9 0 0 0-1.9 1.9Z"/><path d="M19.2 5.4a1.9 1.9 0 0 0-1.9-1.9h-4.4v14.6h4.4a1.9 1.9 0 0 1 1.9 1.9Z"/>',
     puzzle: '<path d="M10.2 4.5a2 2 0 1 1 3.6 1.2v.9h3.1a1 1 0 0 1 1 1v3h-.9a2 2 0 1 0 0 3.6h.9v3.1a1 1 0 0 1-1 1h-3.1v-.9a2 2 0 1 0-3.6 0v.9H7.1a1 1 0 0 1-1-1v-3.1h.9a2 2 0 1 0 0-3.6H6.1v-3a1 1 0 0 1 1-1h3.1v-.9Z"/>',
     refresh: '<path d="M20 11.5a8 8 0 1 0-2.6 6"/><path d="M20 5.5v6h-6"/>',
     logout: '<path d="M15 5.5H6.5a1.5 1.5 0 0 0-1.5 1.5v10a1.5 1.5 0 0 0 1.5 1.5H15"/><path d="M16.5 12H9"/><path d="m13.8 9 3 3-3 3"/>',
@@ -463,6 +469,16 @@
     draft: null,
     plugins: null,
     models: null,
+    kb: {
+      index: null,
+      revision: null,
+      stats: {},
+      formats: KB_FALLBACK_FORMATS.slice(),
+      text: null,
+      textError: '',
+      loadingText: false,
+      search: null
+    },
     logs: { lines: [], path: '', bytes: 0 },
     imageTest: null,
     loaded: {},
@@ -483,6 +499,11 @@
       pluginDraft: null,
       providerForm: null,
       harnessAt: 0,
+      kbSearch: '',
+      kbUploadParent: '',
+      kbEdit: null,
+      kbPreview: null,
+      kbUpload: null,
       logLines: 300,
       logAuto: false,
       logStick: true
@@ -551,6 +572,16 @@
     state.draft = null;
     state.plugins = null;
     state.models = null;
+    state.kb = {
+      index: null,
+      revision: null,
+      stats: {},
+      formats: KB_FALLBACK_FORMATS.slice(),
+      text: null,
+      textError: '',
+      loadingText: false,
+      search: null
+    };
     state.logs = { lines: [], path: '', bytes: 0 };
     state.imageTest = null;
     state.loaded = {};
@@ -567,6 +598,11 @@
     state.ui.harnessAt = 0;
     state.ui.installPath = '';
     state.ui.installUrl = '';
+    state.ui.kbSearch = '';
+    state.ui.kbUploadParent = '';
+    state.ui.kbEdit = null;
+    state.ui.kbPreview = null;
+    state.ui.kbUpload = null;
     state.ui.logStick = true;
   }
 
@@ -2147,6 +2183,400 @@
     if (state.ui.logStick) view.scrollTop = view.scrollHeight;
   }
 
+  /* ============================ 页面：知识库 ============================ */
+  /* 目录 = 分类（章）+ 条目（文件）：分类行在前，分类下的条目缩进一级。
+     标题 / 描述 / 所属分类 / order 都可以行内编辑，保存时整份 PUT /api/knowledge。 */
+
+  function kbIndex() {
+    return state.kb && state.kb.index ? state.kb.index : null;
+  }
+
+  function kbEntries() {
+    var index = kbIndex();
+    return index && Array.isArray(index.entries) ? index.entries : [];
+  }
+
+  function kbFindEntry(id) {
+    var list = kbEntries();
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i] && list[i].id === id) return list[i];
+    }
+    return null;
+  }
+
+  function kbIsFolder(entry) {
+    return !!entry && entry.kind === 'folder';
+  }
+
+  /* order 升序；order 相同或缺失时按 id 稳定排序，避免每次渲染顺序漂移。 */
+  function kbSorted(list) {
+    return list.slice().sort(function (a, b) {
+      var ao = Number(a && a.order);
+      var bo = Number(b && b.order);
+      if (!isFinite(ao)) ao = 100;
+      if (!isFinite(bo)) bo = 100;
+      if (ao !== bo) return ao - bo;
+      return String(a && a.id) < String(b && b.id) ? -1 : 1;
+    });
+  }
+
+  /* 条目的父级：父级不是分类（不存在或其实是文件）时按顶层处理。 */
+  function kbParentOf(entry) {
+    var parent = entry && typeof entry.parent === 'string' ? entry.parent : '';
+    if (parent === '') return '';
+    var found = kbFindEntry(parent);
+    return found && kbIsFolder(found) ? parent : '';
+  }
+
+  function kbSiblings(entry) {
+    var parent = kbParentOf(entry);
+    return kbSorted(
+      kbEntries().filter(function (item) {
+        return item && kbParentOf(item) === parent;
+      })
+    );
+  }
+
+  function kbChildren(parentId) {
+    return kbSorted(
+      kbEntries().filter(function (item) {
+        return item && kbParentOf(item) === parentId;
+      })
+    );
+  }
+
+  /* 深度优先展开成行；seen 防止异常数据（父级成环）把渲染卡死。 */
+  function kbFlatten(parentId, depth, out, seen) {
+    var rows = out || [];
+    var visited = seen || {};
+    kbChildren(parentId).forEach(function (entry) {
+      if (visited[entry.id]) return;
+      visited[entry.id] = true;
+      rows.push({ entry: entry, depth: depth });
+      if (kbIsFolder(entry)) kbFlatten(entry.id, depth + 1, rows, visited);
+    });
+    return rows;
+  }
+
+  function kbTree() {
+    var visited = {};
+    var rows = kbFlatten('', 0, [], visited);
+    /* 兜底：没被展开到的条目（父级成环等）也不能凭空消失，按顶层附在后面。 */
+    kbSorted(kbEntries()).forEach(function (entry) {
+      if (entry && !visited[entry.id]) {
+        visited[entry.id] = true;
+        rows.push({ entry: entry, depth: 0 });
+      }
+    });
+    return rows;
+  }
+
+  function kbMetaText(entry) {
+    if (kbIsFolder(entry)) {
+      return '分类 · ' + kbChildren(entry.id).length + ' 个条目';
+    }
+    var parts = [];
+    if (entry.bytes !== undefined && entry.bytes !== null) parts.push(formatBytes(entry.bytes));
+    parts.push((Number(entry.chars) || 0) + ' 字');
+    if (Array.isArray(entry.images) && entry.images.length) parts.push(entry.images.length + ' 张图');
+    return parts.join(' · ');
+  }
+
+  /* 上传一次只读前 20000 字符（跟 /api/knowledge/text 的 limit 一致）。 */
+  function kbFormats() {
+    return state.kb && Array.isArray(state.kb.formats) && state.kb.formats.length ? state.kb.formats : KB_FALLBACK_FORMATS;
+  }
+
+  function kbAccept() {
+    return kbFormats()
+      .map(function (ext) {
+        return '.' + String(ext).replace(/^\./, '');
+      })
+      .join(',');
+  }
+
+  /* 控制台挂在子路径下时，图片前缀在 API_BASE 里。 */
+  function kbMediaUrl(name) {
+    return (
+      API_BASE +
+      '/kb-media/' +
+      String(name)
+        .split('/')
+        .map(encodeURIComponent)
+        .join('/')
+    );
+  }
+
+  function kbImagesView(entry) {
+    var images = entry && Array.isArray(entry.images) ? entry.images : [];
+    if (images.length === 0) return '';
+    return html`<div class="kb-images">
+      ${images.map(function (name) {
+        var url = kbMediaUrl(name);
+        return html`<a class="kb-image" href="${url}" target="_blank" rel="noopener noreferrer">
+          <img src="${url}" alt="${textOf(name, '图片')}" loading="lazy">
+        </a>`;
+      })}
+    </div>`;
+  }
+
+  /* 分类下拉：选项为所有分类 + 「（顶层）」；编辑分类时排除自己与后代，避免目录成环。 */
+  function kbParentOptions(entryId) {
+    var blocked = {};
+    if (entryId) {
+      blocked[entryId] = true;
+      var stack = [entryId];
+      while (stack.length) {
+        var parentId = stack.pop();
+        kbEntries().forEach(function (item) {
+          if (item && !blocked[item.id] && kbParentOf(item) === parentId) {
+            blocked[item.id] = true;
+            stack.push(item.id);
+          }
+        });
+      }
+    }
+    var options = [{ value: '', label: '（顶层）' }];
+    kbSorted(
+      kbEntries().filter(function (item) {
+        return kbIsFolder(item) && !blocked[item.id];
+      })
+    ).forEach(function (item) {
+      options.push({ value: item.id, label: textOf(item.title, item.id) });
+    });
+    return options;
+  }
+
+  function kbDraftFrom(entry) {
+    return {
+      id: entry.id,
+      title: textOf(entry.title, ''),
+      description: textOf(entry.description, ''),
+      parent: kbParentOf(entry),
+      order: Number(entry.order) || 0,
+      error: ''
+    };
+  }
+
+  function kbDraftDirty() {
+    var draft = state.ui.kbEdit;
+    if (!draft) return false;
+    var entry = kbFindEntry(draft.id);
+    if (!entry) return false;
+    if (textOf(draft.title, '') !== textOf(entry.title, '')) return true;
+    if (textOf(draft.description, '') !== textOf(entry.description, '')) return true;
+    if (textOf(draft.parent, '') !== kbParentOf(entry)) return true;
+    return Number(draft.order) !== (Number(entry.order) || 0);
+  }
+
+  function kbEditView(entry) {
+    var draft = state.ui.kbEdit || {};
+    var options = kbParentOptions(entry.id);
+    var parent = typeof draft.parent === 'string' ? draft.parent : kbParentOf(entry);
+    var order = Number(draft.order);
+    if (!isFinite(order)) order = Number(entry.order) || 0;
+    var dirty = kbDraftDirty();
+    return html`<div class="kb-edit">
+      <div class="kb-edit-grid">
+        <label class="field">
+          <span class="field-label">标题</span>
+          <input class="input" type="text" data-kb-field="title" value="${textOf(draft.title, '')}" placeholder="例如：员工手册">
+        </label>
+        <label class="field">
+          <span class="field-label">所属分类</span>
+          <select class="select" data-kb-field="parent">
+            ${options.map(function (option) {
+              return html`<option value="${option.value}" ${attrs({ selected: option.value === parent })}>${option.label}</option>`;
+            })}
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">顺序</span>
+          <input class="input input-narrow" type="number" min="0" step="1" data-kb-field="order" value="${order}">
+        </label>
+      </div>
+      <label class="field">
+        <span class="field-label">描述</span>
+        <textarea class="textarea" rows="3" data-kb-field="description"
+          placeholder="描述要写清这份资料讲什么、什么时候该查它">${textOf(draft.description, '')}</textarea>
+        <span class="form-hint">描述要写清这份资料讲什么、什么时候该查它：机器人先看目录和描述，再决定要不要读正文。</span>
+      </label>
+      <div class="kb-edit-actions">
+        <button type="button" class="btn btn-primary" data-act="kb-save" data-id="${entry.id}" data-busy="kb-save"
+          ${dirty ? '' : raw('disabled data-locked="kb"')}>保存</button>
+        <button type="button" class="btn" data-act="kb-cancel">取消</button>
+        <span class="muted" id="kb-dirty-note">${dirty ? '有未保存的修改' : '未修改'}</span>
+      </div>
+      <div class="form-error" id="kb-edit-error">${textOf(draft.error, '')}</div>
+    </div>`;
+  }
+
+  function kbRowView(row) {
+    var entry = row.entry;
+    var id = textOf(entry.id, '');
+    var folder = kbIsFolder(entry);
+    var editing = !!(state.ui.kbEdit && state.ui.kbEdit.id === id);
+    var previewing = state.ui.kbPreview === id;
+    var siblings = kbSiblings(entry);
+    var pos = -1;
+    siblings.forEach(function (item, index) {
+      if (item.id === id) pos = index;
+    });
+    var order = Number(entry.order);
+    return html`<div class="kb-row${folder ? ' kb-row-folder' : ''}${row.depth > 0 ? ' kb-row-child' : ''}${editing || previewing ? ' is-open' : ''}">
+      <div class="kb-order">
+        <input class="input kb-order-input" type="number" min="0" step="1" value="${isFinite(order) ? order : 0}"
+          data-kb-order="${id}" data-busy="kb-save" aria-label="顺序" title="顺序">
+        <button type="button" class="btn btn-sm kb-move" data-act="kb-up" data-id="${id}" data-busy="kb-save"
+          aria-label="上移" title="上移" ${pos <= 0 ? raw('disabled data-locked="kb"') : ''}>↑</button>
+        <button type="button" class="btn btn-sm kb-move" data-act="kb-down" data-id="${id}" data-busy="kb-save"
+          aria-label="下移" title="下移" ${pos < 0 || pos >= siblings.length - 1 ? raw('disabled data-locked="kb"') : ''}>↓</button>
+      </div>
+      <div class="kb-main">
+        <div class="kb-title-line">
+          ${folder ? icon('book', 'icon-sm') : ''}
+          <button type="button" class="kb-title" data-act="kb-edit" data-id="${id}" title="点击编辑">${textOf(entry.title, id)}</button>
+          ${folder ? html`<span class="badge">分类</span>` : entry.ext ? html`<span class="badge">${textOf(entry.ext, '')}</span>` : ''}
+        </div>
+        ${entry.description ? html`<div class="kb-desc">${textOf(entry.description, '')}</div>` : ''}
+        <div class="kb-meta">${kbMetaText(entry)}</div>
+      </div>
+      <div class="kb-actions">
+        <button type="button" class="btn btn-sm" data-act="kb-edit" data-id="${id}">编辑</button>
+        ${folder
+          ? ''
+          : html`<button type="button" class="btn btn-sm" data-act="kb-preview" data-id="${id}">${previewing ? '收起预览' : '预览'}</button>`}
+        <button type="button" class="btn btn-sm btn-danger" data-act="kb-delete" data-id="${id}"
+          data-confirm="确定要删除「${textOf(entry.title, id)}」吗？${folder ? '该分类下的所有条目也会一并删除。' : ''}">删除</button>
+      </div>
+      ${editing ? kbEditView(entry) : ''}
+    </div>`;
+  }
+
+  function kbEmptyView() {
+    return html`<div class="kb-empty">
+      <div class="empty">知识库还是空的。把你常用的资料（单位数据表、设定集、FAQ、产品手册）传上来，机器人对话时会直接查它，不用再联网搜。</div>
+      <div class="hint-box">支持 ${kbFormats().join(' / ')}；也可以先「新建分类」分好章节，再逐份上传。</div>
+    </div>`;
+  }
+
+  function kbToolbarView() {
+    var busyUpload = isBusy('kb-upload');
+    var progress = state.ui.kbUpload;
+    return html`<div class="kb-toolbar">
+      <label class="btn btn-primary kb-upload${busyUpload ? ' is-busy' : ''}">
+        ${icon('plus')}<span>${busyUpload && progress ? '上传中 ' + progress.done + '/' + progress.total : '上传文件'}</span>
+        <input type="file" class="kb-file" multiple accept="${kbAccept()}" data-kb-file data-busy="kb-upload" aria-label="上传知识库文件">
+      </label>
+      <button type="button" class="btn" data-act="kb-new-folder" data-busy="kb-new-folder">${icon('plus')}<span>新建分类</span></button>
+      <select class="select kb-parent-select" data-ui="kb-upload-parent" aria-label="上传到哪个分类">
+        ${kbParentOptions('').map(function (option) {
+          return html`<option value="${option.value}" ${attrs({ selected: option.value === kbUploadParentId() })}>上传到：${option.label}</option>`;
+        })}
+      </select>
+      <form class="kb-search" id="kb-search-form" autocomplete="off">
+        <input class="input" type="text" data-ui="kb-search" data-kb-search value="${textOf(state.ui.kbSearch, '')}"
+          placeholder="搜索知识库，回车或点右侧按钮" aria-label="搜索知识库">
+        <button type="button" class="btn" data-act="kb-search" data-busy="kb-search">${icon('search')}<span>搜索</span></button>
+      </form>
+    </div>`;
+  }
+
+  /* 先整体转义，再把命中的关键词包上我们自己插入的 <mark>。 */
+  function kbMarkSnippet(snippet, query) {
+    var escaped = escapeHtml(textOf(snippet, ''));
+    var term = escapeHtml(String(query || '')).trim();
+    if (term === '') return raw(escaped);
+    var pattern = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    return raw(
+      escaped.replace(pattern, function (match) {
+        return '<mark>' + match + '</mark>';
+      })
+    );
+  }
+
+  function kbSearchCard() {
+    var search = state.kb ? state.kb.search : null;
+    if (!search) return '';
+    var results = Array.isArray(search.results) ? search.results : [];
+    return html`<section class="card">
+      ${cardHead(
+        '搜索结果',
+        '关键词「' + search.q + '」，命中 ' + results.length + ' 条（标题或正文）',
+        html`<button type="button" class="btn btn-sm" data-act="kb-search-clear">关闭结果</button>`
+      )}
+      <div class="card-body">
+        ${results.length
+          ? results.map(function (result) {
+              var entry = kbFindEntry(result.id);
+              return html`<div class="kb-result">
+                <div class="kb-result-head">
+                  <button type="button" class="kb-title" data-act="kb-preview" data-id="${textOf(result.id, '')}">${textOf(result.title, textOf(result.id, ''))}</button>
+                  ${result.parentTitle ? html`<span class="badge">${textOf(result.parentTitle, '')}</span>` : ''}
+                  ${entry ? '' : html`<span class="badge">已不在目录中</span>`}
+                </div>
+                <div class="kb-snippet">${kbMarkSnippet(result.snippet, search.q)}</div>
+              </div>`;
+            })
+          : html`<div class="empty">没有找到包含「${search.q}」的内容。</div>`}
+      </div>
+    </section>`;
+  }
+
+  function kbPreviewView() {
+    var id = state.ui.kbPreview;
+    if (!id) return '';
+    var entry = kbFindEntry(id);
+    var text = state.kb && state.kb.text && state.kb.text.id === id ? state.kb.text : null;
+    return html`<div class="kb-preview" id="kb-preview">
+      <div class="kb-preview-head">
+        <div>
+          <h3>${textOf(text ? text.title : '', '') || textOf(entry && entry.title, id)}</h3>
+          <div class="kb-meta">${entry ? kbMetaText(entry) : ''}${entry && entry.file ? html`<span>${textOf(entry.file, '')}</span>` : ''}</div>
+        </div>
+        <div class="card-head-actions">
+          <button type="button" class="btn btn-sm" data-act="kb-preview-close">关闭预览</button>
+        </div>
+      </div>
+      ${state.kb && state.kb.loadingText ? html`<div class="kb-preview-body"><span class="spinner"></span><span>正在读取正文…</span></div>` : ''}
+      ${state.kb && state.kb.textError ? html`<div class="kb-preview-body"><div class="empty">${state.kb.textError}</div></div>` : ''}
+      ${text
+        ? html`<pre class="kb-text">${textOf(text.text, '（这份文件没有抽取到文本内容）')}</pre>
+            ${text.warning ? html`<div class="hint-box">${text.warning}</div>` : ''}
+            ${text.truncated ? html`<div class="hint-box">正文较长，这里只显示前 ${KB_TEXT_LIMIT} 个字符；模型读取时可以按需分页。</div>` : ''}
+            ${kbImagesView(entry)}`
+        : ''}
+    </div>`;
+  }
+
+  function kbSummary() {
+    var stats = state.kb && state.kb.stats ? state.kb.stats : {};
+    var parts = [
+      '分类 ' + (Number(stats.folders) || 0) + ' 个',
+      '文件 ' + (Number(stats.entries) || 0) + ' 份',
+      '合计 ' + (Number(stats.chars) || 0) + ' 字'
+    ];
+    if ((Number(stats.bytes) || 0) > 0) parts.push(formatBytes(Number(stats.bytes)));
+    return parts.join(' · ');
+  }
+
+  function renderKb() {
+    if (!kbIndex()) return emptyCard('知识库尚未加载');
+    var rows = kbTree();
+    return html`
+      ${kbSearchCard()}
+      <section class="card">
+        ${cardHead('知识库目录', kbSummary() + '。机器人对话时会先看目录与描述，再按需读取正文。', kbToolbarView())}
+        <div class="card-body">
+          ${rows.length === 0
+            ? kbEmptyView()
+            : html`<div class="kb-tree">${rows.map(kbRowView)}</div>`}
+          ${rows.length === 0 ? '' : html`<div class="kb-foot">共 ${rows.length} 行；分类行在前，分类下的条目缩进一级。</div>`}
+          ${kbPreviewView()}
+        </div>
+      </section>`;
+  }
+
   /* ============================== 页面表 ============================== */
 
   var PAGES = {
@@ -2184,6 +2614,12 @@
       title: '模型',
       subtitle: 'QQ 会话的五类模型与服务商接入',
       render: renderModels,
+      after: null
+    },
+    kb: {
+      title: '知识库',
+      subtitle: '上传资料做成本地知识库，机器人对话时直接查阅',
+      render: renderKb,
       after: null
     },
     harness: {
@@ -2228,6 +2664,7 @@
     persona: ['config'],
     capabilities: ['config', 'overview'],
     models: ['config', 'models', 'overview'],
+    kb: ['knowledge'],
     harness: ['config', 'models', 'overview'],
     plugins: ['plugins'],
     logs: ['logs']
@@ -2253,9 +2690,22 @@
     });
   }
 
+  function loadKnowledge() {
+    return api('/knowledge').then(function (data) {
+      var index = data && data.index && typeof data.index === 'object' ? data.index : {};
+      if (!Array.isArray(index.entries)) index.entries = [];
+      state.kb.index = index;
+      state.kb.revision = data && typeof data.revision === 'number' ? data.revision : typeof index.revision === 'number' ? index.revision : null;
+      state.kb.stats = data && data.stats && typeof data.stats === 'object' ? data.stats : {};
+      state.kb.formats = data && Array.isArray(data.formats) && data.formats.length ? data.formats : KB_FALLBACK_FORMATS;
+      state.loaded.knowledge = true;
+    });
+  }
+
   var LOADERS = {
     overview: loadOverview,
     config: loadConfig,
+    knowledge: loadKnowledge,
     models: function () {
       return api('/models').then(function (data) {
         state.models = data && typeof data === 'object' ? data : { current: {}, providers: [] };
@@ -3015,6 +3465,470 @@
     }
   }
 
+  /* ============================ 动作：知识库 ============================ */
+
+  /* PUT 的是整份目录：先深拷贝再改，失败时不脏化本地状态。 */
+  function kbSnapshot() {
+    var snapshot = clone(kbIndex() || { entries: [] });
+    if (!Array.isArray(snapshot.entries)) snapshot.entries = [];
+    return snapshot;
+  }
+
+  /* 与后端 newEntryId 同款：k1、k2…，避免与已有 id 冲突。 */
+  function kbNewId(entries) {
+    var used = {};
+    entries.forEach(function (entry) {
+      if (entry && entry.id) used[entry.id] = true;
+    });
+    for (var i = 1; i < 100000; i += 1) {
+      if (!used['k' + i]) return 'k' + i;
+    }
+    return 'k' + Date.now();
+  }
+
+  function kbNextOrder(entries, parent) {
+    var orders = entries
+      .filter(function (entry) {
+        return kbParentOf(entry) === parent;
+      })
+      .map(function (entry) {
+        return Number(entry.order) || 0;
+      });
+    return orders.length === 0 ? 10 : Math.max.apply(null, orders) + 10;
+  }
+
+  function kbUploadParentId() {
+    var parent = textOf(state.ui.kbUploadParent, '');
+    if (parent === '') return '';
+    var found = kbFindEntry(parent);
+    return found && kbIsFolder(found) ? parent : '';
+  }
+
+  /* 整份目录 + revision 提交；冲突处理与 PUT /api/config 一致。 */
+  function kbPutIndex(nextIndex, options) {
+    var opts = options && typeof options === 'object' ? options : {};
+    if (isBusy('kb-save')) return Promise.resolve(false);
+    busySet('kb-save', true);
+    syncBusy();
+    return api('/knowledge', { method: 'PUT', body: { index: nextIndex, revision: state.kb.revision } })
+      .then(function (res) {
+        var revision = res && typeof res.revision === 'number' ? res.revision : state.kb.revision;
+        nextIndex.revision = revision;
+        state.kb.index = nextIndex;
+        state.kb.revision = revision;
+        state.errors.kb = null;
+        if (typeof opts.onSaved === 'function') opts.onSaved();
+        if (opts.message) toast('success', opts.message);
+        renderIf('kb');
+        return true;
+      })
+      .catch(function (err) {
+        if (!err) return false;
+        if (err.status === 409) {
+          toast('error', err.message, { label: '重新加载知识库', act: 'kb-reload' });
+        } else if (err.status !== 401) {
+          toast('error', err.message || '保存知识库失败');
+        }
+        return false;
+      })
+      .then(function (ok) {
+        busySet('kb-save', false);
+        syncBusy();
+        return ok;
+      });
+  }
+
+  function kbReload(force) {
+    if (!force && kbDraftDirty() && !window.confirm('重新加载将丢弃本地未保存的修改，确定继续吗？')) return;
+    if (isBusy('kb-reload')) return;
+    busySet('kb-reload', true);
+    syncBusy();
+    state.ui.kbEdit = null;
+    loadKnowledge()
+      .then(function () {
+        if (state.errors.kb) state.errors.kb = null;
+        toast('success', '知识库已重新加载');
+        renderIf('kb');
+      })
+      .catch(function (err) {
+        if (err && err.status !== 401) toast('error', err && err.message ? err.message : '重新加载失败');
+      })
+      .then(function () {
+        busySet('kb-reload', false);
+        syncBusy();
+      });
+  }
+
+  function kbOpenEditor(id) {
+    var entry = kbFindEntry(id);
+    if (!entry) return;
+    state.ui.kbEdit = kbDraftFrom(entry);
+    renderContent();
+    var input = document.querySelector('[data-kb-field="title"]');
+    if (input) input.focus();
+  }
+
+  function kbCancelEdit() {
+    if (kbDraftDirty() && !window.confirm('放弃这个条目未保存的修改？')) return;
+    state.ui.kbEdit = null;
+    renderContent();
+  }
+
+  function updateKbDraft(field, value) {
+    var draft = state.ui.kbEdit;
+    if (!draft) return;
+    if (field === 'order') draft.order = value === '' ? '' : Number(value);
+    else draft[field] = value;
+    if (draft.error) {
+      draft.error = '';
+      var box = document.getElementById('kb-edit-error');
+      if (box) box.textContent = '';
+    }
+    syncKbSaveButton();
+  }
+
+  /* 只刷新保存按钮与脏标记，打字时不重绘（同插件编辑器的做法）。 */
+  function syncKbSaveButton() {
+    var draft = state.ui.kbEdit;
+    if (!draft) return;
+    var dirty = kbDraftDirty();
+    var busy = isBusy('kb-save');
+    var buttons = document.querySelectorAll('[data-act="kb-save"]');
+    Array.prototype.forEach.call(buttons, function (btn) {
+      if (btn.getAttribute('data-id') !== draft.id) return;
+      if (busy) {
+        btn.disabled = true;
+        btn.classList.add('is-busy');
+      } else {
+        btn.classList.remove('is-busy');
+        btn.disabled = !dirty;
+      }
+    });
+    var note = document.getElementById('kb-dirty-note');
+    if (note) note.textContent = dirty ? '有未保存的修改' : '未修改';
+  }
+
+  function kbSetEditError(message) {
+    var draft = state.ui.kbEdit;
+    if (draft) draft.error = message;
+    var box = document.getElementById('kb-edit-error');
+    if (box) box.textContent = message;
+  }
+
+  function kbSaveEntry() {
+    var draft = state.ui.kbEdit;
+    if (!draft) return;
+    var entry = kbFindEntry(draft.id);
+    if (!entry) return;
+    var title = String(textOf(draft.title, '')).trim();
+    if (title === '') {
+      kbSetEditError('标题不能为空');
+      var input = document.querySelector('[data-kb-field="title"]');
+      if (input) input.focus();
+      return;
+    }
+    if (!kbDraftDirty()) return;
+    var parent = textOf(draft.parent, '');
+    var allowed = kbParentOptions(entry.id).some(function (option) {
+      return option.value === parent;
+    });
+    if (!allowed) {
+      kbSetEditError('不能把分类移动到它自己或它的子分类下面');
+      return;
+    }
+    var next = kbSnapshot();
+    var target = null;
+    next.entries.forEach(function (item) {
+      if (item.id === draft.id) target = item;
+    });
+    if (!target) return;
+    var order = Number(draft.order);
+    target.title = title;
+    target.description = textOf(draft.description, '');
+    target.parent = parent;
+    target.order = isFinite(order) && order >= 0 ? Math.trunc(order) : Number(entry.order) || 0;
+    kbPutIndex(next, {
+      message: '已保存「' + title + '」',
+      onSaved: function () {
+        state.ui.kbEdit = null;
+      }
+    });
+  }
+
+  function kbDelete(id) {
+    if (isBusy('kb-delete')) return;
+    var entry = kbFindEntry(id);
+    busySet('kb-delete', true);
+    syncBusy();
+    api('/knowledge/delete', { method: 'POST', body: { id: id } })
+      .then(function () {
+        if (state.ui.kbEdit && state.ui.kbEdit.id === id) state.ui.kbEdit = null;
+        if (state.ui.kbPreview === id) {
+          state.ui.kbPreview = null;
+          state.kb.text = null;
+        }
+        toast('success', '已删除「' + textOf(entry && entry.title, id) + '」');
+        return loadKnowledge();
+      })
+      .catch(function (err) {
+        if (err && err.status !== 401) toast('error', err && err.message ? err.message : '删除失败');
+      })
+      .then(function () {
+        busySet('kb-delete', false);
+        syncBusy();
+        renderIf('kb');
+      });
+  }
+
+  /* 行内 order 输入框：只改这一条的 order，其他条目的数字保持不变。 */
+  function kbSetOrder(id, value) {
+    var entry = kbFindEntry(id);
+    if (!entry) return;
+    var order = Number(value);
+    if (!isFinite(order) || order < 0) order = 0;
+    order = Math.trunc(order);
+    if (order === (Number(entry.order) || 0)) return;
+    var next = kbSnapshot();
+    next.entries.forEach(function (item) {
+      if (item.id === id) item.order = order;
+    });
+    kbPutIndex(next, null);
+  }
+
+  /* ↑ / ↓：与相邻的同级条目交换 order。 */
+  function kbMove(id, delta) {
+    var entry = kbFindEntry(id);
+    if (!entry) return;
+    var siblings = kbSiblings(entry);
+    var pos = -1;
+    siblings.forEach(function (item, index) {
+      if (item.id === id) pos = index;
+    });
+    if (pos < 0) return;
+    var other = siblings[pos + delta];
+    if (!other) return;
+    var next = kbSnapshot();
+    var a = null;
+    var b = null;
+    next.entries.forEach(function (item) {
+      if (item.id === entry.id) a = item;
+      if (item.id === other.id) b = item;
+    });
+    if (!a || !b) return;
+    var ao = Number(a.order);
+    var bo = Number(b.order);
+    if (!isFinite(ao)) ao = 100;
+    if (!isFinite(bo)) bo = 100;
+    if (ao === bo) a.order = delta < 0 ? bo - 10 : bo + 10;
+    else {
+      a.order = bo;
+      b.order = ao;
+    }
+    kbPutIndex(next, null);
+  }
+
+  function kbNewFolder() {
+    if (isBusy('kb-save')) return;
+    var next = kbSnapshot();
+    var folder = {
+      id: kbNewId(next.entries),
+      parent: '',
+      order: kbNextOrder(next.entries, ''),
+      title: '新分类',
+      description: '',
+      kind: 'folder'
+    };
+    next.entries = next.entries.concat([folder]);
+    kbPutIndex(next, {
+      message: '已新建分类，改成能一眼看懂的名字吧',
+      onSaved: function () {
+        state.ui.kbEdit = kbDraftFrom(folder);
+      }
+    }).then(function (ok) {
+      if (!ok) return;
+      renderIf('kb');
+      var input = document.querySelector('[data-kb-field="title"]');
+      if (input) input.focus();
+    });
+  }
+
+  /* 与 api() 相同的响应处理；上传的请求体是文件原始字节，所以不能走 api()。 */
+  function kbReadResponse(res) {
+    return res
+      .text()
+      .catch(function () {
+        return '';
+      })
+      .then(function (textRaw) {
+        var data = null;
+        if (textRaw) {
+          try {
+            data = JSON.parse(textRaw);
+          } catch (err) {
+            data = null;
+          }
+        }
+        if (!res.ok) {
+          var msg =
+            data && typeof data.error === 'string' && data.error !== ''
+              ? data.error
+              : '上传失败（HTTP ' + res.status + '）';
+          if (res.status === 401) handleUnauthorized();
+          throw new ApiError(res.status, msg, data);
+        }
+        if (data === null) throw new ApiError(res.status, '服务器返回了无法解析的数据', null);
+        return data;
+      });
+  }
+
+  /* 直接把 File 当请求体传，不用 FormData。 */
+  function kbUploadOne(file, parent) {
+    var title = String(file.name || '').replace(/\.[^.\\/]+$/, '');
+    if (title.trim() === '') title = String(file.name || '未命名文件');
+    var url =
+      API_BASE +
+      '/api/knowledge/upload?name=' +
+      encodeURIComponent(String(file.name || '')) +
+      '&title=' +
+      encodeURIComponent(title) +
+      '&parent=' +
+      encodeURIComponent(parent || '');
+    return fetch(url, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/octet-stream' },
+      body: file
+    }).then(kbReadResponse, function () {
+      throw new ApiError(0, '网络请求失败，请确认控制台服务仍在运行', null);
+    });
+  }
+
+  /* 逐个上传并显示「第 n/m 个」，全部结束后刷新目录。 */
+  function kbUploadFiles(input) {
+    var files = input && input.files ? Array.prototype.slice.call(input.files) : [];
+    if (files.length === 0 || isBusy('kb-upload')) return;
+    var parent = kbUploadParentId();
+    var total = files.length;
+    var done = 0;
+    var failed = 0;
+    var firstError = '';
+    busySet('kb-upload', true);
+    state.ui.kbUpload = { done: 0, total: total, name: '' };
+    syncBusy();
+    renderIf('kb');
+    var chain = Promise.resolve();
+    files.forEach(function (file, index) {
+      chain = chain.then(function () {
+        state.ui.kbUpload = { done: index, total: total, name: String(file.name || '') };
+        renderIf('kb');
+        return kbUploadOne(file, parent)
+          .then(function (res) {
+            done += 1;
+            if (res && res.warning) toast('info', '「' + file.name + '」：' + res.warning);
+          })
+          .catch(function (err) {
+            if (err && err.status === 401) throw err;
+            failed += 1;
+            if (firstError === '') firstError = err && err.message ? err.message : '上传失败';
+          });
+      });
+    });
+    return chain
+      .then(function () {
+        if (failed === 0) toast('success', '已上传 ' + done + ' 个文件');
+        else if (done === 0) toast('error', '上传失败：' + firstError);
+        else toast('error', '上传完成：成功 ' + done + ' 个，失败 ' + failed + ' 个（' + firstError + '）');
+        return loadKnowledge();
+      })
+      .catch(function (err) {
+        if (err && err.status !== 401) toast('error', err && err.message ? err.message : '刷新知识库失败');
+      })
+      .then(function () {
+        busySet('kb-upload', false);
+        state.ui.kbUpload = null;
+        if (input) input.value = '';
+        syncBusy();
+        renderIf('kb');
+      });
+  }
+
+  function kbScrollPreview() {
+    var panel = document.getElementById('kb-preview');
+    if (panel && typeof panel.scrollIntoView === 'function') panel.scrollIntoView({ block: 'nearest' });
+  }
+
+  function kbOpenPreview(id) {
+    if (state.ui.kbPreview === id) {
+      kbClosePreview();
+      return;
+    }
+    state.ui.kbPreview = id;
+    state.kb.text = null;
+    state.kb.textError = '';
+    state.kb.loadingText = true;
+    renderContent();
+    kbScrollPreview();
+    api('/knowledge/text?id=' + encodeURIComponent(id) + '&limit=' + KB_TEXT_LIMIT)
+      .then(function (data) {
+        if (state.ui.kbPreview !== id) return;
+        state.kb.text = {
+          id: id,
+          title: textOf(data && data.title, ''),
+          text: textOf(data && data.text, ''),
+          truncated: !!(data && data.truncated),
+          warning: data && data.warning ? String(data.warning) : ''
+        };
+      })
+      .catch(function (err) {
+        if (state.ui.kbPreview !== id) return;
+        if (err && err.status !== 401) state.kb.textError = err.message || '读取正文失败';
+      })
+      .then(function () {
+        state.kb.loadingText = false;
+        renderIf('kb');
+      });
+  }
+
+  function kbClosePreview() {
+    state.ui.kbPreview = null;
+    state.kb.text = null;
+    state.kb.textError = '';
+    state.kb.loadingText = false;
+    renderContent();
+  }
+
+  function kbRunSearch() {
+    var q = String(textOf(state.ui.kbSearch, '')).trim();
+    if (q === '') {
+      state.kb.search = null;
+      renderContent();
+      return;
+    }
+    if (isBusy('kb-search')) return;
+    busySet('kb-search', true);
+    syncBusy();
+    api('/knowledge/search?q=' + encodeURIComponent(q) + '&limit=8')
+      .then(function (data) {
+        state.kb.search = { q: q, results: data && Array.isArray(data.results) ? data.results : [] };
+      })
+      .catch(function (err) {
+        if (err && err.status !== 401) {
+          state.kb.search = null;
+          toast('error', err && err.message ? err.message : '搜索失败');
+        }
+      })
+      .then(function () {
+        busySet('kb-search', false);
+        syncBusy();
+        renderIf('kb');
+      });
+  }
+
+  function kbClearSearch() {
+    state.kb.search = null;
+    renderContent();
+  }
+
   /* ============================ 页面级动作 ============================ */
 
   function refreshPage() {
@@ -3025,7 +3939,9 @@
       ? isConfigDirty()
       : route === 'plugins'
         ? isPluginDraftDirty(state.ui.pluginDraft)
-        : false;
+        : route === 'kb'
+          ? kbDraftDirty()
+          : false;
     if (dirtyHere && !window.confirm('刷新将丢弃未保存的修改，确定继续吗？')) return;
     busySet('page-refresh', true);
     syncBusy();
@@ -3038,6 +3954,7 @@
     }
     state.ui.pluginEdit = null;
     state.ui.pluginDraft = null;
+    state.ui.kbEdit = null;
     loadPage(route, true, true).then(function () {
       busySet('page-refresh', false);
       syncBusy();
@@ -3574,7 +4491,7 @@
     }
     render();
     /* 会随时间变化的页面每次进入都重新拉取（配置草稿不会被覆盖）。 */
-    var fresh = route === 'overview' || route === 'logs' || route === 'capabilities';
+    var fresh = route === 'overview' || route === 'logs' || route === 'capabilities' || route === 'kb';
     loadPage(route, fresh);
   }
 
@@ -3698,6 +4615,42 @@
       case 'plugin-install':
         installPlugin(el.getAttribute('data-source'), el);
         break;
+      case 'kb-new-folder':
+        kbNewFolder();
+        break;
+      case 'kb-edit':
+        kbOpenEditor(el.getAttribute('data-id'));
+        break;
+      case 'kb-cancel':
+        kbCancelEdit();
+        break;
+      case 'kb-save':
+        kbSaveEntry();
+        break;
+      case 'kb-delete':
+        kbDelete(el.getAttribute('data-id'));
+        break;
+      case 'kb-up':
+        kbMove(el.getAttribute('data-id'), -1);
+        break;
+      case 'kb-down':
+        kbMove(el.getAttribute('data-id'), 1);
+        break;
+      case 'kb-preview':
+        kbOpenPreview(el.getAttribute('data-id'));
+        break;
+      case 'kb-preview-close':
+        kbClosePreview();
+        break;
+      case 'kb-reload':
+        kbReload(true);
+        break;
+      case 'kb-search':
+        kbRunSearch();
+        break;
+      case 'kb-search-clear':
+        kbClearSearch();
+        break;
       case 'logs-refresh':
         refreshLogs(false);
         break;
@@ -3731,6 +4684,11 @@
       updatePluginDraft(field, el.value);
       return;
     }
+    var kbField = el.getAttribute('data-kb-field');
+    if (kbField) {
+      updateKbDraft(kbField, el.value);
+      return;
+    }
     var ui = el.getAttribute('data-ui');
     if (!ui) return;
     if (ui === 'username') state.ui.username = el.value;
@@ -3745,6 +4703,7 @@
     } else if (ui === 'image-prompt') state.ui.imagePrompt = el.value;
     else if (ui === 'install-path') state.ui.installPath = el.value;
     else if (ui === 'install-url') state.ui.installUrl = el.value;
+    else if (ui === 'kb-search') state.ui.kbSearch = el.value;
   }
 
   function onChange(ev) {
@@ -3754,6 +4713,20 @@
     var providerField = el.getAttribute('data-provider-field');
     if (providerField) {
       updateProviderForm(providerField, el.value);
+      return;
+    }
+    var kbField = el.getAttribute('data-kb-field');
+    if (kbField) {
+      updateKbDraft(kbField, el.value);
+      return;
+    }
+    if (el.hasAttribute('data-kb-file')) {
+      kbUploadFiles(el);
+      return;
+    }
+    var kbOrder = el.getAttribute('data-kb-order');
+    if (kbOrder) {
+      kbSetOrder(kbOrder, el.value);
       return;
     }
     var ui = el.getAttribute('data-ui');
@@ -3769,6 +4742,10 @@
     }
     if (ui === 'harness-provider' || ui === 'harness-model') {
       handleHarnessSelect(ui, el.value);
+      return;
+    }
+    if (ui === 'kb-upload-parent') {
+      state.ui.kbUploadParent = el.value;
       return;
     }
     if (ui === 'kind-provider' || ui === 'kind-model') {
@@ -3798,6 +4775,11 @@
       addChips(el.getAttribute('data-chip'), value);
       return;
     }
+    if (ev.key === 'Enter' && el.hasAttribute('data-kb-search')) {
+      ev.preventDefault();
+      kbRunSearch();
+      return;
+    }
     if ((ev.key === 's' || ev.key === 'S') && (ev.metaKey || ev.ctrlKey) && state.session.authed && isConfigDirty()) {
       ev.preventDefault();
       saveConfig();
@@ -3812,6 +4794,9 @@
     } else if (form && form.id === 'credential-form') {
       ev.preventDefault();
       changeCredentials();
+    } else if (form && form.id === 'kb-search-form') {
+      ev.preventDefault();
+      kbRunSearch();
     }
   }
 

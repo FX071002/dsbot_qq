@@ -56,6 +56,7 @@ docker run -d --name qqbot --restart always -p 9999:9999 \
 | 人格 | 角色设定（名称/身份/风格/规则），或完全自定义提示词，含预设一键套用 |
 | 能力 | 工具、联网、生图（生图可指定服务商、模型、图片公网地址） |
 | 模型 | **五类模型的独立选择**（见下）+ 接入其他模型服务商 |
+| **知识库** | 上传本地资料（txt/md/csv/ini/json/docx/xlsx/pptx），编排成分类与条目；模型对话时用 `kb_list`/`kb_search`/`kb_read` 直接查，省掉联网搜索的延迟。优先级低于人格设定 |
 | Harness 服务 | 把控制台接到一个 DeepSeek Harness（DeepSeek / OpenAI / 自定义），并可选锁定主干模型 |
 | 插件 | 安装（内置/本地目录/tar.gz 链接）、启停、编辑提示词、卸载 |
 | 日志 | 实时日志、过滤、清空 |
@@ -93,6 +94,7 @@ docker run -d --name qqbot --restart always -p 9999:9999 \
 | [INSTALL.md](INSTALL.md) | 镜像 / 源码两种部署方式，升级、卸载、排障 |
 | [docs/operations.md](docs/operations.md) | 每个页面的细节、日常运维、常见问题 |
 | [docs/models.md](docs/models.md) | 五类模型怎么接、怎么测、服务商预设 |
+| [docs/knowledge.md](docs/knowledge.md) | 知识库：上传本地资料，让机器人直接查、不必联网 |
 | [docs/standalone.md](docs/standalone.md) | 独立运行的原理、配置、与 Harness 模式的切换 |
 | [docs/harness.md](docs/harness.md) | 接上 Harness 继续开发 |
 | [docs/architecture.md](docs/architecture.md) | 数据流、文件契约、设计取舍 |

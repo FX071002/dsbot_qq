@@ -85,6 +85,49 @@ const server = createServer(async (request, response) => {
   if (path === '/v1/chat/completions') {
     const body = await readBody(request)
     const model = body.model ?? 'mock-chat'
+
+    // 脚本化的工具调用：模型先查知识库，再照着查到的内容回答。
+    // 这样无需真实模型也能验证"目录 → 检索 → 读正文 → 作答"这条链路。
+    const toolNames = (body.tools ?? []).map((tool) => tool.function?.name)
+    const messages = Array.isArray(body.messages) ? body.messages : []
+    const toolResult = [...messages].reverse().find((message) => message.role === 'tool')
+    if (toolNames.includes('kb_search') && toolResult === undefined) {
+      const question = [...messages].reverse().find((message) => message.role === 'user')?.content ?? ''
+      const keyword = /伊利卡拉/.test(question) ? '伊利卡拉' : question.slice(0, 12)
+      return json(response, 200, {
+        id: 'chatcmpl-mock-tool',
+        object: 'chat.completion',
+        model,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [
+                {
+                  id: 'call_kb_1',
+                  type: 'function',
+                  function: { name: 'kb_search', arguments: JSON.stringify({ query: keyword }) }
+                }
+              ]
+            },
+            finish_reason: 'tool_calls'
+          }
+        ]
+      })
+    }
+    if (toolResult !== undefined) {
+      const firstValue = String(toolResult.content).match(/Strength=(\d+)|生命值[：: ]*(\d+)/)
+      const reply = `根据本机资料：伊利卡拉空中要塞生命值 ${firstValue ? firstValue[1] ?? firstValue[2] : '未知'}（来自知识库，未联网）`
+      return json(response, 200, {
+        id: 'chatcmpl-mock-final',
+        object: 'chat.completion',
+        model,
+        choices: [{ index: 0, message: { role: 'assistant', content: reply }, finish_reason: 'stop' }]
+      })
+    }
+
     const reply = `你好，我是 ${model}（本地模拟服务商）`
     if (body.stream !== true) {
       return json(response, 200, {
