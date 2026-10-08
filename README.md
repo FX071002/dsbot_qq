@@ -59,7 +59,7 @@ docker run -d --name qqbot --restart always -p 9999:9999 \
 | **知识库** | 上传本地资料（txt/md/csv/ini/json/docx/xlsx/pptx），编排成分类与条目；模型对话时用 `kb_list`/`kb_search`/`kb_read` 直接查，省掉联网搜索的延迟。优先级低于人格设定 |
 | Harness 服务 | 把控制台接到一个 DeepSeek Harness（DeepSeek / OpenAI / 自定义），并可选锁定主干模型 |
 | 插件 | 安装（内置/本地目录/tar.gz 链接）、启停、编辑提示词、卸载 |
-| 日志 | 实时日志、过滤、清空 |
+| 日志 | **实时多来源**：机器人运行日志 / 控制台审计日志 / 控制台进程输出 / 全部（合并按时间排序）；1 秒增量跟随、自动滚底与「回到最新」、等级与文本过滤、下载、按来源清空 |
 
 ### 五类模型
 

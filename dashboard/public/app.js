@@ -9,7 +9,9 @@
   /* ============================== 常量 ============================== */
 
   var VERSION = '1.0.0';
-  var LOG_REFRESH_MS = 5000;
+  /* 日志页：实时跟随的轮询间隔（秒级），以及视图与缓存保留的最大行数。 */
+  var LOG_FOLLOW_MS = 1000;
+  var LOG_MAX_LINES = 3000;
   var ROUTES = ['connect', 'overview', 'bot', 'persona', 'capabilities', 'models', 'kb', 'harness', 'plugins', 'logs'];
 
   var BRIDGE_STATES = {
@@ -30,6 +32,13 @@
   };
 
   var LEVELS = ['info', 'warn', 'error', 'raw'];
+
+  /* 日志来源兜底文案：/api/logs 的 sources[] 还没回来时用它渲染来源 tab。 */
+  var LOG_SOURCE_FALLBACK = [
+    { id: 'bot', label: '机器人运行日志' },
+    { id: 'console', label: '控制台审计日志' },
+    { id: 'stdout', label: '控制台进程输出' }
+  ];
 
   /* 知识库页：后端没给 formats 时的兜底上传格式，以及预览一次读取的最大字符数（与 /api/knowledge/text 的 limit 一致）。 */
   var KB_FALLBACK_FORMATS = ['txt', 'md', 'csv', 'ini', 'json', 'log', 'docx', 'xlsx', 'pptx'];
@@ -194,7 +203,9 @@
     plus: '<path d="M12 5.5v13M5.5 12h13"/>',
     plug: '<path d="M9 3.5v4.2M15 3.5v4.2"/><path d="M6.6 7.7h10.8v3.6a5.4 5.4 0 0 1-10.8 0Z"/><path d="M12 16.8v3.7"/>',
     server: '<rect x="3.5" y="4.5" width="17" height="6" rx="1.8"/><rect x="3.5" y="13.5" width="17" height="6" rx="1.8"/><path d="M7.3 7.5h.01M7.3 16.5h.01"/>',
-    image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4.5 17.5 4.8-4.4 3.4 3 2.6-2.3 4.2 3.7"/>'
+    image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4.5 17.5 4.8-4.4 3.4 3 2.6-2.3 4.2 3.7"/>',
+    trash: '<path d="M4.8 6.9h14.4"/><path d="M9.7 6.9V4.8h4.6v2.1"/><path d="M6.7 6.9 7.6 19a1.2 1.2 0 0 0 1.2 1.1h6.4a1.2 1.2 0 0 0 1.2-1.1l.9-12.1"/><path d="M10.4 10.3v6.1M13.6 10.3v6.1"/>',
+    arrowDown: '<path d="M12 5.2v13.6"/><path d="m6.4 13.2 5.6 5.6 5.6-5.6"/>'
   };
 
   /* ============================ 工具函数 ============================ */
@@ -479,7 +490,7 @@
       loadingText: false,
       search: null
     },
-    logs: { lines: [], path: '', bytes: 0 },
+    logs: { source: 'bot', lines: [], sources: [], bytes: 0, offset: null, path: '', updatedAt: null },
     imageTest: null,
     loaded: {},
     loading: {},
@@ -505,12 +516,17 @@
       kbPreview: null,
       kbUpload: null,
       logLines: 300,
-      logAuto: false,
+      logFollow: true,
+      logLevel: 'all',
+      logQuery: '',
       logStick: true
     }
   };
 
   var logTimer = null;
+  /* 日志请求串行化：polls / 手动刷新 / 切换来源不会在途叠加。 */
+  var logChain = Promise.resolve();
+  var logActive = 0;
 
   function busySet(key, on) {
     if (on) state.busy[key] = true;
@@ -582,7 +598,7 @@
       loadingText: false,
       search: null
     };
-    state.logs = { lines: [], path: '', bytes: 0 };
+    state.logs = emptyLogs('bot');
     state.imageTest = null;
     state.loaded = {};
     state.loading = {};
@@ -603,6 +619,9 @@
     state.ui.kbEdit = null;
     state.ui.kbPreview = null;
     state.ui.kbUpload = null;
+    state.ui.logFollow = true;
+    state.ui.logLevel = 'all';
+    state.ui.logQuery = '';
     state.ui.logStick = true;
   }
 
@@ -2119,68 +2138,322 @@
   }
 
   /* ============================ 页面：日志 ============================ */
+  /* 三个来源（机器人运行日志 / 控制台审计日志 / 控制台进程输出）+ 合并视图。
+     单来源走字节游标增量（offset → 只取新增），合并视图没有游标，退化为定时整取尾部。
+     过滤（等级 + 文本）只作用于显示，不改变缓存与游标。 */
 
-  function logLinesView() {
-    var lines = state.logs && Array.isArray(state.logs.lines) ? state.logs.lines : [];
-    if (lines.length === 0) return raw('<div class="empty">暂无日志内容。</div>');
-    return html`${lines.map(function (line) {
-      var level = String((line && line.level) || '').toLowerCase();
-      if (LEVELS.indexOf(level) < 0) level = 'raw';
-      return html`<div class="log-line level-${level}"><span class="log-time">${shortTime(line && line.time)}</span><span class="log-text">${textOf(line && line.text, '')}</span></div>`;
+  function emptyLogs(source) {
+    return {
+      source: textOf(source, '') === '' ? 'bot' : String(source),
+      lines: [],
+      sources: [],
+      bytes: 0,
+      offset: null,
+      path: '',
+      updatedAt: null
+    };
+  }
+
+  /* 后端 sources[] 只列三类文件，「全部」是前端加的合并 tab。 */
+  function logSourceList() {
+    var list = state.logs && Array.isArray(state.logs.sources) ? state.logs.sources : [];
+    var known = list.filter(function (item) {
+      return item && typeof item.id === 'string' && item.id !== '' && item.id !== 'all';
+    });
+    return known.length > 0 ? known : LOG_SOURCE_FALLBACK.slice();
+  }
+
+  function logSourceLabel(id) {
+    var list = logSourceList();
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i].id === id) return textOf(list[i].label, id);
+    }
+    if (id === 'all') return '全部来源';
+    return textOf(id, '机器人运行日志');
+  }
+
+  function logSourceSizeText(id) {
+    if (id === 'all') {
+      var total = 0;
+      var known = false;
+      logSourceList().forEach(function (item) {
+        if (typeof item.bytes === 'number') {
+          total += item.bytes;
+          known = true;
+        }
+      });
+      return known ? formatBytes(total) : '';
+    }
+    var list = logSourceList();
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i].id === id) return typeof list[i].bytes === 'number' ? formatBytes(list[i].bytes) : '';
+    }
+    return '';
+  }
+
+  function logSourceShort(id) {
+    if (id === 'console') return '审计';
+    if (id === 'stdout') return '输出';
+    if (id === 'bot') return '机器人';
+    return String(id);
+  }
+
+  function normLogLevel(line) {
+    var level = String((line && line.level) || '').toLowerCase();
+    return LEVELS.indexOf(level) >= 0 ? level : 'raw';
+  }
+
+  function logQueryText() {
+    return String(state.ui.logQuery || '').trim().toLowerCase();
+  }
+
+  function logFilterActive() {
+    return textOf(state.ui.logLevel, 'all') !== 'all' || logQueryText() !== '';
+  }
+
+  function logFilterLines(lines) {
+    var list = Array.isArray(lines) ? lines : [];
+    var level = textOf(state.ui.logLevel, 'all');
+    var query = logQueryText();
+    if (level === 'all' && query === '') return list.slice();
+    return list.filter(function (line) {
+      if (level !== 'all' && normLogLevel(line) !== level) return false;
+      if (query === '') return true;
+      return String(textOf(line && line.text, '')).toLowerCase().indexOf(query) >= 0;
+    });
+  }
+
+  function logVisibleLines() {
+    return logFilterLines(state.logs && Array.isArray(state.logs.lines) ? state.logs.lines : []);
+  }
+
+  function logLinesView(lines) {
+    var list = Array.isArray(lines) ? lines : [];
+    return html`${list.map(function (line) {
+      var level = normLogLevel(line);
+      var src = line && typeof line.source === 'string' && line.source !== '' ? line.source : '';
+      return html`<div class="log-line level-${level}"><span class="log-time">${shortTime(line && line.time)}</span>${src === '' ? '' : html`<span class="log-src" title="${logSourceLabel(src)}">${logSourceShort(src)}</span>`}<span class="log-text">${textOf(line && line.text, '')}</span></div>`;
     })}`;
   }
 
+  function logEmptyText() {
+    var total = state.logs && Array.isArray(state.logs.lines) ? state.logs.lines.length : 0;
+    if (total > 0 && logFilterActive()) return '没有符合当前过滤条件的日志。';
+    if (state.ui.logFollow) return '暂无日志内容，实时跟随已开启…';
+    return '暂无日志内容。';
+  }
+
+  function logSourceTabs() {
+    var ids = logSourceList().map(function (item) {
+      return item.id;
+    });
+    if (ids.indexOf(state.logs.source) < 0) ids = [state.logs.source].concat(ids);
+    ids = ids.concat(['all']);
+    return html`${ids.map(function (id) {
+      var active = state.logs.source === id;
+      var size = logSourceSizeText(id);
+      return html`<button type="button" class="tab${active ? ' is-active' : ''}" role="tab" data-act="logs-source" data-source="${id}" ${attrs({ 'aria-selected': active ? 'true' : 'false' })}>${logSourceLabel(id)}${size === '' ? '' : html`<span class="log-size">${size}</span>`}</button>`;
+    })}`;
+  }
+
+  function logLevelChips() {
+    var current = textOf(state.ui.logLevel, 'all');
+    return html`${['all'].concat(LEVELS).map(function (level) {
+      var active = current === level;
+      return html`<button type="button" class="log-chip${active ? ' is-active' : ''}" data-act="logs-level" data-level="${level}" ${attrs({ 'aria-pressed': active ? 'true' : 'false' })}>${level === 'all' ? '全部' : level}</button>`;
+    })}`;
+  }
+
+  function logBarView() {
+    return html`<div class="log-sources" id="log-sources" role="tablist" aria-label="日志来源">${logSourceTabs()}</div>
+      <div class="log-filters">
+        <div class="log-levels" role="group" aria-label="按等级过滤">${logLevelChips()}</div>
+        <input class="input input-narrow log-filter" type="search" data-ui="log-filter" value="${state.ui.logQuery}"
+          placeholder="过滤文本…" aria-label="按文本过滤日志" autocomplete="off" spellcheck="false">
+      </div>`;
+  }
+
+  function logToolbarView() {
+    return html`<select class="select" data-ui="log-lines" aria-label="显示行数">
+        ${[100, 300, 1000].map(function (n) {
+          return html`<option value="${n}" ${attrs({ selected: Number(state.ui.logLines) === n })}>${n} 行</option>`;
+        })}
+      </select>
+      <label class="switch">
+        <input type="checkbox" data-ui="log-follow" aria-label="实时跟随日志" ${attrs({ checked: !!state.ui.logFollow })}>
+        <span class="track"></span>
+        <span class="switch-label">实时跟随</span>
+      </label>
+      <button type="button" class="btn btn-sm" data-act="logs-refresh" data-busy="logs-refresh">${icon('refresh')}<span>刷新</span></button>
+      <button type="button" class="btn btn-sm" data-act="logs-download">${icon('download')}<span>下载</span></button>
+      <button type="button" class="btn btn-sm btn-danger" data-act="logs-clear" data-busy="logs-clear">${icon('trash')}<span>清空</span></button>`;
+  }
+
+  function logPathText() {
+    var source = textOf(state.logs.source, 'bot');
+    if (source !== 'bot') return '';
+    if (state.logs.path) return state.logs.path;
+    return state.overview && state.overview.log && state.overview.log.path ? state.overview.log.path : '';
+  }
+
+  function logStatusView() {
+    var source = textOf(state.logs.source, 'bot');
+    var total = state.logs && Array.isArray(state.logs.lines) ? state.logs.lines.length : 0;
+    var visible = logVisibleLines().length;
+    var follow = !!state.ui.logFollow;
+    var path = logPathText();
+    var sizeText;
+    if (source === 'all') {
+      sizeText = typeof state.logs.bytes === 'number' ? '合并 ' + state.logs.bytes + ' 行' : '';
+    } else {
+      sizeText = formatBytes(typeof state.logs.bytes === 'number' ? state.logs.bytes : 0);
+    }
+    return html`<span class="log-source-name">${logSourceLabel(source)}</span>
+      ${sizeText === '' ? '' : html`<span>${sizeText}</span>`}
+      ${path === '' ? '' : html`<span><code>${path}</code></span>`}
+      <span>显示 ${visible} / 缓存 ${total} 行，最新在最后</span>
+      <span class="log-follow-state${follow ? ' is-live' : ''}">${follow ? '跟随中 · 1s' : '已暂停'}</span>
+      <span>更新于 ${state.logs.updatedAt ? shortTime(state.logs.updatedAt) : '—'}</span>`;
+  }
+
   function renderLogs() {
-    var lines = state.logs && Array.isArray(state.logs.lines) ? state.logs.lines : [];
-    var path = state.logs && state.logs.path ? state.logs.path : state.overview && state.overview.log ? state.overview.log.path : '';
-    var bytes = state.logs && typeof state.logs.bytes === 'number' ? state.logs.bytes : null;
+    var visible = logVisibleLines();
     return html`
       <section class="card">
         <div class="card-head">
           <div>
             <h2>运行日志</h2>
-            <div class="log-meta">
-              <span>${textOf(path, '—')}</span>
-              ${bytes === null ? '' : html`<span>${formatBytes(bytes)}</span>`}
-              <span>显示 ${lines.length} 行，最新的在最后</span>
-            </div>
+            <div class="log-meta" id="log-status">${logStatusView()}</div>
           </div>
-          <div class="card-head-actions log-toolbar">
-            <select class="select" data-ui="log-lines" aria-label="显示行数">
-              ${[100, 300, 1000].map(function (n) {
-                return html`<option value="${n}" ${attrs({ selected: Number(state.ui.logLines) === n })}>${n} 行</option>`;
-              })}
-            </select>
-            <label class="switch">
-              <input type="checkbox" data-ui="log-auto" aria-label="自动刷新日志" ${attrs({ checked: !!state.ui.logAuto })}>
-              <span class="track"></span>
-              <span class="switch-label">自动刷新</span>
-            </label>
-            <button type="button" class="btn btn-sm" data-act="logs-refresh" data-busy="logs-refresh">${icon('refresh')}<span>刷新</span></button>
-            <button type="button" class="btn btn-sm" data-act="logs-download">${icon('download')}<span>下载</span></button>
-          </div>
+          <div class="card-head-actions log-toolbar">${logToolbarView()}</div>
         </div>
-        <div class="log-view" id="log-view" role="log" aria-label="运行日志" tabindex="0">${logLinesView()}</div>
+        <div class="log-bar" id="log-bar">${logBarView()}</div>
+        <div class="log-wrap">
+          <div class="log-view" id="log-view" role="log" aria-label="${logSourceLabel(state.logs.source)}" tabindex="0">
+            <div class="log-rows" id="log-rows">${logLinesView(visible)}</div>
+            <div class="log-empty" id="log-empty" ${attrs({ hidden: visible.length > 0 })}>${logEmptyText()}</div>
+          </div>
+          <button type="button" class="btn btn-sm log-jump" id="log-jump" data-act="logs-latest" ${attrs({ hidden: state.ui.logStick || visible.length === 0 })}>${icon('arrowDown', 'icon-sm')}<span>回到最新</span></button>
+        </div>
       </section>`;
   }
 
+  function logViewEl() {
+    return state.route === 'logs' ? document.getElementById('log-view') : null;
+  }
+
+  function logRowsEl() {
+    return state.route === 'logs' ? document.getElementById('log-rows') : null;
+  }
+
+  function logAtBottom(view) {
+    var el = view || logViewEl();
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  }
+
+  function scrollLogToBottom() {
+    var view = logViewEl();
+    if (view) view.scrollTop = view.scrollHeight;
+  }
+
+  /* DOM 行数上限：长时间跟随只保留最后 LOG_MAX_LINES 行。 */
+  function pruneLogRows(rows) {
+    var el = rows || logRowsEl();
+    if (!el) return;
+    while (el.childElementCount > LOG_MAX_LINES && el.firstElementChild) el.removeChild(el.firstElementChild);
+  }
+
+  function syncLogEmpty() {
+    var empty = document.getElementById('log-empty');
+    var rows = logRowsEl();
+    if (!empty || !rows) return;
+    var hasRows = rows.childElementCount > 0;
+    empty.hidden = hasRows;
+    if (!hasRows) empty.textContent = logEmptyText();
+  }
+
+  function syncLogSourceTabs() {
+    var host = document.getElementById('log-sources');
+    if (!host) return;
+    Array.prototype.forEach.call(host.querySelectorAll('[data-act="logs-source"]'), function (btn) {
+      var id = btn.getAttribute('data-source');
+      var active = id === state.logs.source;
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      var size = btn.querySelector('.log-size');
+      if (size) {
+        var text = logSourceSizeText(id);
+        size.textContent = text;
+        size.hidden = text === '';
+      }
+    });
+  }
+
+  function syncLogLevelChips() {
+    var host = document.querySelector('.log-levels');
+    if (!host) return;
+    Array.prototype.forEach.call(host.querySelectorAll('[data-act="logs-level"]'), function (btn) {
+      var active = btn.getAttribute('data-level') === textOf(state.ui.logLevel, 'all');
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function syncLogJump() {
+    var jump = document.getElementById('log-jump');
+    var rows = logRowsEl();
+    if (jump) jump.hidden = !!state.ui.logStick || !rows || rows.childElementCount === 0;
+  }
+
+  /* 状态行 / 开关 / 来源与等级高亮：只改文本，不重建 DOM，避免打断输入。 */
+  function syncLogChrome() {
+    var status = document.getElementById('log-status');
+    if (status) status.innerHTML = logStatusView().str;
+    var box = document.querySelector('[data-ui="log-follow"]');
+    if (box) box.checked = !!state.ui.logFollow;
+    var view = logViewEl();
+    if (view) view.setAttribute('aria-label', logSourceLabel(state.logs.source));
+    syncLogSourceTabs();
+    syncLogLevelChips();
+    syncLogJump();
+  }
+
+  /* 整屏重绘日志行：首取 / 切换来源 / 过滤 / 文件轮转重建时用。 */
   function patchLogView() {
-    var view = document.getElementById('log-view');
-    if (!view) {
+    if (state.route !== 'logs') return;
+    var view = logViewEl();
+    var rows = logRowsEl();
+    if (!view || !rows) {
       renderContent();
       return;
     }
-    var atBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
-    if (atBottom) state.ui.logStick = true;
-    view.innerHTML = logLinesView().str;
-    var meta = document.querySelector('.log-meta');
-    if (meta) {
-      var lines = state.logs && Array.isArray(state.logs.lines) ? state.logs.lines : [];
-      var bytes = state.logs && typeof state.logs.bytes === 'number' ? state.logs.bytes : null;
-      var path = state.logs && state.logs.path ? state.logs.path : '';
-      meta.innerHTML = html`<span>${textOf(path, '—')}</span>${bytes === null ? '' : html`<span>${formatBytes(bytes)}</span>`}<span>显示 ${lines.length} 行，最新的在最后</span>`.str;
-    }
-    if (state.ui.logStick) view.scrollTop = view.scrollHeight;
+    state.ui.logStick = logAtBottom(view);
+    rows.innerHTML = logLinesView(logVisibleLines()).str;
+    pruneLogRows(rows);
+    syncLogEmpty();
+    syncLogChrome();
+    if (state.ui.logStick) scrollLogToBottom();
+  }
+
+  /* 增量跟随：只把新行追加到末尾，避免每秒重建几千行 DOM。 */
+  function appendLogView(newLines) {
+    if (state.route !== 'logs') return;
+    var view = logViewEl();
+    var rows = logRowsEl();
+    if (!view || !rows) return;
+    state.ui.logStick = logAtBottom(view);
+    var filtered = logFilterLines(newLines);
+    if (filtered.length > 0) rows.insertAdjacentHTML('beforeend', logLinesView(filtered).str);
+    pruneLogRows(rows);
+    syncLogEmpty();
+    syncLogChrome();
+    if (state.ui.logStick) scrollLogToBottom();
+  }
+
+  function logOnScroll(view) {
+    state.ui.logStick = logAtBottom(view);
+    syncLogJump();
   }
 
   /* ============================ 页面：知识库 ============================ */
@@ -2638,19 +2911,22 @@
     },
     logs: {
       title: '日志',
-      subtitle: '查看与下载运行日志',
+      subtitle: '三类来源的实时跟随、过滤、下载与清空',
       render: renderLogs,
       after: function () {
-        var view = document.getElementById('log-view');
-        if (!view) return;
-        view.addEventListener(
-          'scroll',
-          function () {
-            state.ui.logStick = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
-          },
-          { passive: true }
-        );
-        if (state.ui.logStick) view.scrollTop = view.scrollHeight;
+        var view = logViewEl();
+        if (view) {
+          view.addEventListener(
+            'scroll',
+            function () {
+              logOnScroll(view);
+            },
+            { passive: true }
+          );
+          if (state.ui.logStick) view.scrollTop = view.scrollHeight;
+        }
+        syncLogChrome();
+        syncLogTimer();
       }
     }
   };
@@ -2722,14 +2998,8 @@
       });
     },
     logs: function () {
-      return api('/logs?lines=' + encodeURIComponent(state.ui.logLines)).then(function (data) {
-        state.logs = {
-          lines: data && Array.isArray(data.lines) ? data.lines : [],
-          path: data && typeof data.path === 'string' ? data.path : '',
-          bytes: data && typeof data.bytes === 'number' ? data.bytes : 0
-        };
-        state.loaded.logs = true;
-      });
+      /* 首取/重建：不带 offset，拿当前来源的尾部若干行。 */
+      return fetchLogs({ incremental: false });
     }
   };
 
@@ -3391,21 +3661,78 @@
 
   /* ============================== 动作：日志 ============================== */
 
+  function logLinesParam() {
+    return clampInt(state.ui.logLines, 50, 5000, 300);
+  }
+
+  /* 所有日志请求串行化（logChain）：实时跟随、手动刷新、切换来源不会在途叠加。 */
+  function fetchLogs(options) {
+    var opts = options || {};
+    var queuedSource = state.logs.source;
+    var run = function () {
+      /* 排队期间来源被切走 → 丢弃这个过期请求，避免把旧来源的行灌进新来源。 */
+      if (state.logs.source !== queuedSource) return null;
+      return runLogRequest(queuedSource, opts);
+    };
+    var next = logChain.then(run, run);
+    logChain = next.then(
+      function () {},
+      function () {}
+    );
+    return next;
+  }
+
+  function runLogRequest(source, opts) {
+    var incremental = opts.incremental === true && source !== 'all' && typeof state.logs.offset === 'number';
+    var query = '/logs?source=' + encodeURIComponent(source) + '&lines=' + encodeURIComponent(logLinesParam());
+    if (incremental) query += '&offset=' + encodeURIComponent(state.logs.offset);
+    logActive += 1;
+    return api(query).then(
+      function (data) {
+        logActive -= 1;
+        return applyLogData(data, incremental);
+      },
+      function (err) {
+        logActive -= 1;
+        throw err;
+      }
+    );
+  }
+
+  /* 写入 state.logs；返回 { replaced, added } 供调用方决定整屏重建还是追加。 */
+  function applyLogData(data, incremental) {
+    var info = data && typeof data === 'object' ? data : {};
+    var incoming = Array.isArray(info.lines) ? info.lines : [];
+    var replaced = incremental !== true || !!info.reset;
+    var previous = state.logs && Array.isArray(state.logs.lines) ? state.logs.lines : [];
+
+    if (Array.isArray(info.sources) && info.sources.length > 0) state.logs.sources = info.sources;
+    if (typeof info.bytes === 'number') state.logs.bytes = info.bytes;
+    if (typeof info.path === 'string' && info.path !== '') state.logs.path = info.path;
+    if (typeof info.offset === 'number') state.logs.offset = info.offset;
+    else if (state.logs.source === 'all') state.logs.offset = null;
+
+    state.logs.lines = (replaced ? incoming : previous.concat(incoming)).slice(-LOG_MAX_LINES);
+    state.logs.updatedAt = new Date().toISOString();
+    state.loaded.logs = true;
+    return { replaced: replaced, added: replaced ? [] : incoming };
+  }
+
+  /* 把请求结果落到视图：整屏重建（首取/轮转）或增量追加。 */
+  function applyLogResult(result) {
+    if (!result || state.route !== 'logs') return;
+    if (result.replaced) patchLogView();
+    else appendLogView(result.added);
+  }
+
+  /* 手动/首取/重建：不带游标，整屏重绘。 */
   function refreshLogs(silent) {
     if (!isBusy('logs-refresh')) {
       busySet('logs-refresh', true);
       syncBusy();
     }
-    return api('/logs?lines=' + encodeURIComponent(state.ui.logLines))
-      .then(function (data) {
-        state.logs = {
-          lines: data && Array.isArray(data.lines) ? data.lines : [],
-          path: data && typeof data.path === 'string' ? data.path : '',
-          bytes: data && typeof data.bytes === 'number' ? data.bytes : 0
-        };
-        state.loaded.logs = true;
-        if (state.route === 'logs') patchLogView();
-      })
+    return fetchLogs({ incremental: false })
+      .then(applyLogResult)
       .catch(function (err) {
         if (!silent && err && err.status !== 401) toast('error', err && err.message ? err.message : '日志加载失败');
       })
@@ -3415,36 +3742,133 @@
       });
   }
 
-  function setLogAuto(on) {
-    state.ui.logAuto = !!on;
-    if (logTimer !== null) {
-      clearInterval(logTimer);
-      logTimer = null;
-    }
-    if (on) {
-      logTimer = setInterval(function () {
-        if (state.route === 'logs' && state.session.authed && !document.hidden) refreshLogs(true);
-      }, LOG_REFRESH_MS);
-    }
+  function logShouldFollow() {
+    return (
+      state.route === 'logs' &&
+      state.session.authed &&
+      !state.session.mustChange &&
+      !!state.ui.logFollow &&
+      !document.hidden
+    );
   }
 
+  /* 1s 心跳只在「日志页 + 已登录 + 开关打开 + 页面可见」时存在。 */
+  function syncLogTimer() {
+    if (!logShouldFollow()) {
+      stopLogTimer();
+      return;
+    }
+    if (logTimer === null) logTimer = setInterval(logPoll, LOG_FOLLOW_MS);
+  }
+
+  /* 只清计时器，不改用户的跟随偏好：离开页面后回来仍按开关状态恢复。 */
   function stopLogTimer() {
     if (logTimer !== null) {
       clearInterval(logTimer);
       logTimer = null;
     }
-    state.ui.logAuto = false;
+  }
+
+  /* 上一次请求还没回来就跳过这一拍，避免在途请求叠加。 */
+  function logPoll() {
+    if (logActive > 0) return;
+    if (!logShouldFollow()) return;
+    if (isBusy('logs-refresh') || isBusy('logs-clear')) return;
+    fetchLogs({ incremental: true })
+      .then(applyLogResult)
+      .catch(function () {
+        /* 跟随失败保持静默：下一拍会把断掉的行补回来。 */
+      });
+  }
+
+  function setLogFollow(on) {
+    state.ui.logFollow = !!on;
+    syncLogTimer();
+    syncLogChrome();
+    if (state.ui.logFollow) logPoll();
+  }
+
+  function setLogSource(source) {
+    var id = String(source || '');
+    if (id === '' || id === state.logs.source) return;
+    var known = id === 'all';
+    logSourceList().forEach(function (item) {
+      if (item.id === id) known = true;
+    });
+    if (!known) return;
+    var sources = state.logs.sources;
+    /* 切换来源 = 清空视图 + 清掉游标，然后按当前行数首取一次。 */
+    state.logs = emptyLogs(id);
+    state.logs.sources = sources;
+    state.ui.logStick = true;
+    patchLogView();
+    refreshLogs(false);
+  }
+
+  function setLogLevel(level) {
+    var id = String(level || 'all');
+    if (id !== 'all' && LEVELS.indexOf(id) < 0) return;
+    if (textOf(state.ui.logLevel, 'all') === id) return;
+    state.ui.logLevel = id;
+    patchLogView();
+  }
+
+  /* 「回到最新」：滚到底、恢复自动滚动，并重新打开实时跟随。 */
+  function jumpLogsToLatest() {
+    state.ui.logStick = true;
+    if (!state.ui.logFollow) {
+      state.ui.logFollow = true;
+      syncLogTimer();
+      logPoll();
+    }
+    scrollLogToBottom();
+    syncLogChrome();
+  }
+
+  /* 清空当前来源：先清视图并把游标归零，再增量拉一次（顺带刷新 sources 体积）。 */
+  function clearLogs() {
+    var source = textOf(state.logs.source, 'bot');
+    if (!window.confirm('确定要清空「' + logSourceLabel(source) + '」吗？该操作不可撤销。')) return;
+    if (!isBusy('logs-clear')) {
+      busySet('logs-clear', true);
+      syncBusy();
+    }
+    api('/control', { method: 'POST', body: { action: 'clear-log', payload: { source: source } } })
+      .then(function (data) {
+        if (data && data.ok === false) {
+          toast('error', textOf(data && data.message, '日志清空失败'));
+          return null;
+        }
+        state.logs.lines = [];
+        state.logs.bytes = 0;
+        state.logs.offset = source === 'all' ? null : 0;
+        state.logs.updatedAt = new Date().toISOString();
+        state.ui.logStick = true;
+        patchLogView();
+        toast('success', textOf(data && data.message, '已清空日志'));
+        return fetchLogs({ incremental: source !== 'all' });
+      })
+      .then(applyLogResult)
+      .catch(function (err) {
+        if (err && err.status !== 401) toast('error', err && err.message ? err.message : '日志清空失败');
+      })
+      .then(function () {
+        busySet('logs-clear', false);
+        syncBusy();
+      });
   }
 
   function downloadLogs() {
-    var lines = state.logs && Array.isArray(state.logs.lines) ? state.logs.lines : [];
+    var lines = logVisibleLines();
     if (lines.length === 0) {
       toast('error', '当前没有可下载的日志内容');
       return;
     }
+    var source = textOf(state.logs.source, 'bot');
     var text = lines
       .map(function (line) {
-        return '[' + textOf(line && line.time, '') + '] [' + textOf(line && line.level, 'raw') + '] ' + textOf(line && line.text, '');
+        var tag = line && typeof line.source === 'string' && line.source !== '' ? ' [' + line.source + ']' : '';
+        return '[' + textOf(line && line.time, '') + '] [' + textOf(line && line.level, 'raw') + ']' + tag + ' ' + textOf(line && line.text, '');
       })
       .join('\n');
     try {
@@ -3452,14 +3876,14 @@
       var url = URL.createObjectURL(blob);
       var link = document.createElement('a');
       link.href = url;
-      link.download = 'qqbot-' + stamp() + '.log';
+      link.download = 'qqbot-logs-' + source + '-' + stamp() + '.log';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       setTimeout(function () {
         URL.revokeObjectURL(url);
       }, 2000);
-      toast('success', '已开始下载 ' + lines.length + ' 行日志');
+      toast('success', '已开始下载 ' + lines.length + ' 行日志' + (logFilterActive() ? '（已按当前过滤）' : ''));
     } catch (err) {
       toast('error', '浏览器不支持下载该内容');
     }
@@ -4657,6 +5081,18 @@
       case 'logs-download':
         downloadLogs();
         break;
+      case 'logs-source':
+        setLogSource(el.getAttribute('data-source'));
+        break;
+      case 'logs-level':
+        setLogLevel(el.getAttribute('data-level'));
+        break;
+      case 'logs-latest':
+        jumpLogsToLatest();
+        break;
+      case 'logs-clear':
+        clearLogs();
+        break;
       default:
         break;
     }
@@ -4704,6 +5140,11 @@
     else if (ui === 'install-path') state.ui.installPath = el.value;
     else if (ui === 'install-url') state.ui.installUrl = el.value;
     else if (ui === 'kb-search') state.ui.kbSearch = el.value;
+    else if (ui === 'log-filter') {
+      /* 客户端过滤：即时重绘显示，不发请求、不动游标。 */
+      state.ui.logQuery = el.value;
+      patchLogView();
+    }
   }
 
   function onChange(ev) {
@@ -4733,11 +5174,12 @@
     if (ui === 'log-lines') {
       state.ui.logLines = clampInt(el.value, 50, 5000, 300);
       state.ui.logStick = true;
+      /* 不带游标 → 按新的行数重新首取一次。 */
       refreshLogs(false);
       return;
     }
-    if (ui === 'log-auto') {
-      setLogAuto(!!el.checked);
+    if (ui === 'log-follow') {
+      setLogFollow(!!el.checked);
       return;
     }
     if (ui === 'harness-provider' || ui === 'harness-model') {
@@ -4828,12 +5270,20 @@
     return '';
   }
 
+  /* 日志页切到后台就停掉 1s 心跳；回到前台立刻补一次增量。 */
+  function onVisibilityChange() {
+    if (state.route !== 'logs') return;
+    syncLogTimer();
+    if (!document.hidden && state.ui.logFollow) logPoll();
+  }
+
   function bindEvents() {
     document.addEventListener('click', onClick);
     document.addEventListener('input', onInput);
     document.addEventListener('change', onChange);
     document.addEventListener('keydown', onKeydown);
     document.addEventListener('submit', onSubmit);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('hashchange', onHashChange);
     window.addEventListener('beforeunload', onBeforeUnload);
   }

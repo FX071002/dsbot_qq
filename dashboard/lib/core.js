@@ -168,13 +168,24 @@ export function readLog(paths, lines = 300) {
 }
 
 /** Truncate the bridge log. */
-export function clearLog(paths) {
-  try {
-    writeFileSync(paths.logFile, '', { mode: 0o600 })
-    return true
-  } catch {
-    return false
+/**
+ * 清空某个来源的日志文件。
+ * @param paths - 控制台路径集合。
+ * @param source - `bot` | `console` | `stdout`（`all` 会清掉三类）。
+ */
+export function clearLog(paths, source = 'bot') {
+  const targets = source === 'all' ? Object.keys(LOG_SOURCES) : [source]
+  let ok = true
+  for (const id of targets) {
+    const meta = LOG_SOURCES[id]
+    if (meta === undefined) continue
+    try {
+      writeFileSync(meta.file(paths), '', { mode: 0o600 })
+    } catch {
+      ok = false
+    }
   }
+  return ok
 }
 
 /** Load (or create) the dashboard account store. */
@@ -383,12 +394,132 @@ export async function testImage(paths, prompt, base = '') {
 }
 
 /** Append one line to a dashboard-side audit log. */
-export function audit(paths, message) {
+export function audit(paths, message, level = 'info') {
   try {
     mkdirSync(paths.runtimeDir, { recursive: true })
-    appendFileSync(join(paths.runtimeDir, 'dashboard.log'), `${new Date().toISOString()} ${message}\n`, { mode: 0o600 })
+    // 格式与机器人日志一致：ISO 时间 + [等级] + 文本，前端用同一套解析
+    appendFileSync(join(paths.runtimeDir, 'dashboard.log'), `${new Date().toISOString()} [${level}] ${message}\n`, { mode: 0o600 })
   } catch {
     /* auditing must never break a request */
+  }
+}
+
+/** 控制台可选的三类日志文件；`all` 表示三份合并。 */
+export const LOG_SOURCES = {
+  bot: { label: '机器人运行日志', file: (paths) => paths.logFile },
+  console: { label: '控制台审计日志', file: (paths) => join(paths.runtimeDir, 'dashboard.log') },
+  stdout: { label: '控制台进程输出', file: (paths) => join(paths.runtimeDir, 'dashboard.out') }
+}
+
+/** 解析一行日志；兼容"有时间戳无等级"的控制台审计格式。 */
+function parseLogLine(raw) {
+  const match = /^(\S+)\s+\[(\w+)\]\s*([\s\S]*)$/.exec(raw)
+  if (match !== null) return { time: match[1], level: match[2].toLowerCase(), text: match[3] }
+  const plain = /^(\d{4}-\d{2}-\d{2}T\S+)\s+([\s\S]*)$/.exec(raw)
+  if (plain !== null) return { time: plain[1], level: 'info', text: plain[2] }
+  return { time: null, level: 'raw', text: raw }
+}
+
+/** 把一段文本解析成日志行。 */
+function parseLogText(text) {
+  const parsed = []
+  for (const raw of text.split('\n')) {
+    if (raw.trim() === '') continue
+    parsed.push(parseLogLine(raw))
+  }
+  return parsed
+}
+
+/** 读取一个文件的尾部（最多 1 MB）。 */
+function tailOf(file, maxBytes = 1_000_000) {
+  const size = statSync(file).size
+  const start = Math.max(0, size - maxBytes)
+  const buffer = readFileSync(file).subarray(start)
+  let text = buffer.toString('utf8')
+  if (start > 0) text = text.slice(text.indexOf('\n') + 1)
+  return { text, size }
+}
+
+/**
+ * 读日志。
+ *
+ * @param paths - 控制台路径集合。
+ * @param options.source - `bot` | `console` | `stdout` | `all`。
+ * @param options.lines - 首次读取返回多少行（尾部）。
+ * @param options.offset - 上次返回的字节游标；给了它就只返回**新增**内容（实时跟随用）。
+ * @returns `{ source, lines, bytes, offset, reset, sources }`。
+ */
+export function readLogSource(paths, options = {}) {
+  const source = ['bot', 'console', 'stdout', 'all'].includes(options.source) ? options.source : 'bot'
+  const lines = Math.max(1, Math.min(5000, Number(options.lines) || 300))
+  const offset = Number.isFinite(Number(options.offset)) ? Number(options.offset) : undefined
+  const sources = Object.entries(LOG_SOURCES).map(([id, meta]) => {
+    let bytes = 0
+    try {
+      bytes = statSync(meta.file(paths)).size
+    } catch {
+      /* 文件还没生成 */
+    }
+    return { id, label: meta.label, bytes }
+  })
+
+  if (source === 'all') {
+    const merged = []
+    for (const id of Object.keys(LOG_SOURCES)) {
+      try {
+        const { text, size } = tailOf(LOG_SOURCES[id].file(paths))
+        // 多行内容（堆栈、启动横幅）的续行没有时间戳：让它继承上一条的时间，
+        // 否则合并排序会把这些续行甩到最前面，读起来是断的。
+        let carried = ''
+        for (const line of parseLogText(text)) {
+          if (line.time !== null) carried = line.time
+          merged.push({ ...line, source: id, bytes: size, sortKey: line.time ?? carried })
+        }
+      } catch {
+        /* 跳过读不到的文件 */
+      }
+    }
+    merged.sort((left, right) => String(left.sortKey).localeCompare(String(right.sortKey)))
+    return {
+      source,
+      lines: merged.slice(-lines).map(({ sortKey, ...rest }) => rest),
+      // bytes 统一语义 = 文件体积（三类之和）；合并后的行数由 lines.length 表达
+      bytes: sources.reduce((sum, item) => sum + item.bytes, 0),
+      offset: undefined,
+      reset: false,
+      sources
+    }
+  }
+
+  const file = LOG_SOURCES[source].file(paths)
+  try {
+    const size = statSync(file).size
+    // 增量读取：游标有效且文件没有变小（轮转）时只取新增部分
+    if (offset !== undefined && offset <= size) {
+      if (offset === size) return { source, lines: [], bytes: size, offset: size, reset: false, sources, path: file }
+      const buffer = readFileSync(file).subarray(offset, offset + 1_000_000)
+      return {
+        source,
+        lines: parseLogText(buffer.toString('utf8')),
+        bytes: size,
+        offset: Math.min(size, offset + 1_000_000),
+        reset: false,
+        sources,
+        path: file
+      }
+    }
+    const { text, size: current } = tailOf(file)
+    return {
+      source,
+      lines: parseLogText(text).slice(-lines),
+      bytes: current,
+      offset: current,
+      reset: offset !== undefined,
+      sources,
+      path: file
+    }
+  } catch {
+    return { source, lines: [], bytes: 0, offset: 0, reset: false, sources, path: file }
   }
 }
 

@@ -1304,6 +1304,96 @@ code {
   max-width: 130px;
 }
 
+/* 来源 tab + 等级 chips + 文本过滤 */
+.log-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 18px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-sources {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.log-sources .tab {
+  font-size: 12.5px;
+}
+
+.log-size {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.log-sources .tab.is-active .log-size {
+  color: inherit;
+  opacity: 0.75;
+}
+
+.log-size[hidden] {
+  display: none;
+}
+
+.log-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.log-levels {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.log-chip {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--panel);
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.log-chip:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.log-chip.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.log-chip[data-level="warn"].is-active {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.log-chip[data-level="error"].is-active {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.log-filter {
+  flex: 0 1 240px;
+  margin-left: auto;
+}
+
 .log-meta {
   font-size: 12px;
   color: var(--muted);
@@ -1313,17 +1403,61 @@ code {
   margin-top: 3px;
 }
 
+.log-source-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.log-follow-state {
+  color: var(--muted);
+}
+
+.log-follow-state.is-live {
+  color: var(--ok);
+}
+
+.log-wrap {
+  position: relative;
+}
+
 .log-view {
   height: calc(100vh - 320px);
   min-height: 300px;
   overflow: auto;
   padding: 10px 12px;
   background: var(--panel-2);
-  border-top: 1px solid var(--border);
   border-radius: 0 0 var(--radius) var(--radius);
   font-family: var(--mono);
   font-size: 12.5px;
   line-height: 1.65;
+}
+
+.log-empty[hidden] {
+  display: none;
+}
+
+.log-jump {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2;
+  background: var(--panel);
+  box-shadow: 0 4px 14px rgba(16, 24, 40, 0.18);
+}
+
+.log-jump[hidden] {
+  display: none;
+}
+
+.log-src {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .log-line {
@@ -2118,6 +2252,15 @@ code {
 
   .log-view {
     height: 60vh;
+  }
+
+  .log-bar {
+    padding: 2px 14px 10px;
+  }
+
+  .log-filter {
+    flex: 1 1 100%;
+    margin-left: 0;
   }
 
   .card-head {

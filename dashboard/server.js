@@ -47,6 +47,7 @@ import {
   readBuiltins,
   readCatalog,
   readLog,
+  readLogSource,
   readRuntime,
   readStatus,
   openAuth,
@@ -348,10 +349,13 @@ async function route(request, response, url) {
       return sendJson(response, 200, { ok: true, message: '已请求热重载桥接实现，几秒内生效' })
     }
     if (action === 'clear-log') {
-      const ok = clearLog(paths)
-      audit(paths, 'log cleared')
-      return sendJson(response, 200, { ok, message: ok ? '日志已清空' : '日志清空失败' })
+      const source = String(body.payload?.source ?? 'bot')
+      const ok = clearLog(paths, source)
+      const label = { bot: '机器人', console: '控制台审计', stdout: '控制台输出', all: '全部' }[source] ?? source
+      audit(paths, `log cleared（${label}）`)
+      return sendJson(response, 200, { ok, message: ok ? `已清空：${label}` : '日志清空失败' })
     }
+
     const bridged = {
       reconnect: 'reconnect',
       'test-connection': 'test-connection',
@@ -438,8 +442,19 @@ async function route(request, response, url) {
   }
 
   if (pathname === '/api/logs' && method === 'GET') {
+    // source: bot | console | stdout | all；offset: 上次的字节游标（实时跟随时只回新增）
+    const source = String(url.searchParams.get('source') ?? 'bot')
     const lines = Number(url.searchParams.get('lines') ?? '300')
-    return sendJson(response, 200, readLog(paths, Number.isFinite(lines) ? lines : 300))
+    const offsetParam = url.searchParams.get('offset')
+    return sendJson(
+      response,
+      200,
+      readLogSource(paths, {
+        source,
+        lines: Number.isFinite(lines) ? lines : 300,
+        offset: offsetParam === null ? undefined : Number(offsetParam)
+      })
+    )
   }
 
   if (pathname === '/api/image/test' && method === 'POST') {
@@ -591,6 +606,8 @@ const server = createServer((request, response) => {
 function announce() {
   const addresses = ['127.0.0.1', ...Object.values(networkInterfaces()).flat().filter((entry) => entry !== undefined && entry.family === 'IPv4' && !entry.internal).map((entry) => entry.address)]
   console.log(`[dashboard] 大肥鱼的QQ机器人服务 v${VERSION}`)
+  // 控制台自己的生命周期也进审计日志：日志页「控制台」来源据此有内容
+  audit(paths, `console 启动：v${VERSION} home=${paths.home} port=${PORT} base=${BASE || '/'}`)
   console.log(`[dashboard] 家目录   : ${paths.home}`)
   console.log(`[dashboard] 运行时   : ${paths.runtimeDir}`)
   console.log(`[dashboard] 登录账号 : ${auth.username}（密码见 ${paths.authFile}，或 QQBOT_AUTH_PASSWORD 环境变量）`)
