@@ -11,6 +11,28 @@
 /** Version of the runtime document this module understands. */
 export const RUNTIME_VERSION = 1
 
+/** 功能使用权限的四个等级，从高到低。 */
+export const COMMAND_LEVELS = ['owner', 'admin', 'leveled', 'member']
+
+/** 等级中文名（控制台、提示语共用）。 */
+export const COMMAND_LEVEL_LABELS = {
+  owner: '群主',
+  admin: '管理员',
+  leveled: '达到群等级的成员',
+  member: '群成员'
+}
+
+/** 等级序号：越小权限越高；未知等级按最低算。 */
+export function commandLevelRank(level) {
+  const index = COMMAND_LEVELS.indexOf(String(level ?? '').trim())
+  return index < 0 ? COMMAND_LEVELS.length - 1 : index
+}
+
+/** 发送者等级是否达到指令要求（同级或更高即可）。 */
+export function commandLevelAllows(senderLevel, requiredLevel) {
+  return commandLevelRank(senderLevel) <= commandLevelRank(requiredLevel)
+}
+
 /** The fixed deployment sentence every composed persona starts from. */
 export const BASE_DEPLOYMENT_PROMPT = [
   '你正在通过 QQ 官方机器人（QQ 开放平台）与用户对话，你的最终回复会作为一条纯文本 QQ 消息直接发给对方。',
@@ -185,6 +207,24 @@ export function defaultRuntimeConfig() {
       activePersonaId: 'default',
       custom: BASE_DEPLOYMENT_PROMPT
     },
+    // 功能（指令）与群内使用权限
+    commands: {
+      enabled: true,
+      // 所有指令都必须以 / 开头，避免日常聊天误触发
+      requireSlash: true,
+      // 私聊里没有群角色，默认把对方当成群主（控制台可改成 member）
+      privateChatLevel: 'owner',
+      defaultLevel: 'member',
+      // "达到自定义群等级"的门槛：机器人自己统计的活跃等级（QQ 不向机器人开放群等级）
+      groupLevelThreshold: 5,
+      levels: {
+        help: 'member',
+        listPersona: 'member',
+        switchPersona: 'admin',
+        status: 'member'
+      },
+      groups: {}
+    },
     capabilities: {
       tools: true,
       web: true,
@@ -300,12 +340,58 @@ function normalizeProviders(value) {
  * @param raw - candidate document.
  * @returns a fresh, complete runtime document.
  */
+/** 归一化指令权限配置（等级白名单、按群覆盖、成员名单去重截断）。 */
+function normalizeCommands(value, base) {
+  const source = value !== null && typeof value === 'object' ? value : {}
+  const levels = {}
+  const rawLevels = source.levels !== null && typeof source.levels === 'object' ? source.levels : {}
+  for (const [key, level] of Object.entries(rawLevels)) {
+    const id = String(key).trim().slice(0, 40)
+    const normalized = String(level).trim()
+    if (id === '' || !COMMAND_LEVELS.includes(normalized)) continue
+    levels[id] = normalized
+  }
+  const groups = {}
+  const rawGroups = source.groups !== null && typeof source.groups === 'object' ? source.groups : {}
+  for (const [key, entry] of Object.entries(rawGroups)) {
+    const id = String(key).trim().slice(0, 80)
+    if (id === '' || entry === null || typeof entry !== 'object') continue
+    const memberList = (input) =>
+      (Array.isArray(input) ? input : [])
+        .map((item) => String(item ?? '').trim())
+        .filter((item) => item !== '')
+        .slice(0, 200)
+    const groupLevels = {}
+    const scoped = entry.levels !== null && typeof entry.levels === 'object' ? entry.levels : {}
+    for (const [commandId, level] of Object.entries(scoped)) {
+      const normalized = String(level).trim()
+      if (COMMAND_LEVELS.includes(normalized)) groupLevels[String(commandId).trim().slice(0, 40)] = normalized
+    }
+    groups[id] = {
+      owners: memberList(entry.owners),
+      admins: memberList(entry.admins),
+      leveled: memberList(entry.leveled),
+      levels: groupLevels
+    }
+  }
+  return {
+    enabled: bool(source.enabled, base.enabled),
+    requireSlash: bool(source.requireSlash, base.requireSlash),
+    privateChatLevel: COMMAND_LEVELS.includes(String(source.privateChatLevel)) ? String(source.privateChatLevel) : base.privateChatLevel,
+    defaultLevel: COMMAND_LEVELS.includes(String(source.defaultLevel)) ? String(source.defaultLevel) : base.defaultLevel,
+    groupLevelThreshold: int(source.groupLevelThreshold, base.groupLevelThreshold, 0, 10_000),
+    levels: { ...base.levels, ...levels },
+    groups
+  }
+}
+
 export function normalizeRuntimeConfig(raw) {
   const base = defaultRuntimeConfig()
   const source = raw !== null && typeof raw === 'object' ? raw : {}
   const bot = source.bot !== null && typeof source.bot === 'object' ? source.bot : {}
   const persona = source.persona !== null && typeof source.persona === 'object' ? source.persona : {}
   const capabilities = source.capabilities !== null && typeof source.capabilities === 'object' ? source.capabilities : {}
+  const commands = source.commands !== null && typeof source.commands === 'object' ? source.commands : {}
   const image = capabilities.image !== null && typeof capabilities.image === 'object' ? capabilities.image : {}
   const models = source.models !== null && typeof source.models === 'object' ? source.models : {}
   const chat = models.chat !== null && typeof models.chat === 'object' ? models.chat : {}
@@ -340,6 +426,7 @@ export function normalizeRuntimeConfig(raw) {
       useCustom: bool(persona.useCustom, base.persona.useCustom),
       custom: str(persona.custom, base.persona.custom)
     },
+    commands: normalizeCommands(commands, base.commands),
     capabilities: {
       tools: bool(capabilities.tools, base.capabilities.tools),
       web: bool(capabilities.web, base.capabilities.web),

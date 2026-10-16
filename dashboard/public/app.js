@@ -12,7 +12,7 @@
   /* 日志页：实时跟随的轮询间隔（秒级），以及视图与缓存保留的最大行数。 */
   var LOG_FOLLOW_MS = 1000;
   var LOG_MAX_LINES = 3000;
-  var ROUTES = ['connect', 'overview', 'bot', 'persona', 'capabilities', 'models', 'kb', 'harness', 'plugins', 'logs'];
+  var ROUTES = ['connect', 'overview', 'bot', 'persona', 'commands', 'capabilities', 'models', 'kb', 'harness', 'plugins', 'logs'];
 
   var BRIDGE_STATES = {
     online: { label: '在线', tone: 'ok' },
@@ -100,6 +100,25 @@
   var PERSONA_PROFILE_LIMIT = 8;
   var PERSONA_ID_MAX = 32;
 
+  /* 「功能」页（config.commands）：四个使用等级，取值与 shared/runtime.js 的 COMMAND_LEVELS 一致。 */
+  var COMMAND_LEVELS = ['owner', 'admin', 'leveled', 'member'];
+  var COMMAND_LEVEL_OPTIONS = [
+    { value: 'owner', label: '群主' },
+    { value: 'admin', label: '管理员' },
+    { value: 'leveled', label: '达到群等级的成员' },
+    { value: 'member', label: '群成员' }
+  ];
+  var COMMAND_LEVEL_LABELS = { owner: '群主', admin: '管理员', leveled: '达到群等级的成员', member: '群成员' };
+  /* 四条内置指令：id 与 config.commands.levels 的键、shared/runtime.js 的 commandTable 一致。 */
+  var COMMAND_TABLE = [
+    { id: 'help', name: '/help', description: '列出你有权限使用的功能' },
+    { id: 'listPersona', name: '/人设', description: '列出可用的人设档案与当前档案' },
+    { id: 'switchPersona', name: '/切换人设', description: '切换机器人人设，用法：/切换人设 名字或序号' },
+    { id: 'status', name: '/状态', description: '查看机器人与桥接的运行状态' }
+  ];
+  /* 与后端 normalizeCommands 一致：每个群的三份名单各最多保留 200 条。 */
+  var COMMAND_MEMBERS_MAX = 200;
+
   /* 与 bridge/lib/runtime.js 的 IMAGE_PROVIDER_PRESETS 保持一致。 */
   var IMAGE_PRESETS = {
     siliconflow: { label: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', model: 'Kwai-Kolors/Kolors' },
@@ -173,6 +192,7 @@
       items: [
         { id: 'bot', label: '机器人', icon: 'robot' },
         { id: 'persona', label: '人格', icon: 'user' },
+        { id: 'commands', label: '功能', icon: 'shield' },
         { id: 'capabilities', label: '能力', icon: 'sliders' }
       ]
     },
@@ -209,7 +229,8 @@
     server: '<rect x="3.5" y="4.5" width="17" height="6" rx="1.8"/><rect x="3.5" y="13.5" width="17" height="6" rx="1.8"/><path d="M7.3 7.5h.01M7.3 16.5h.01"/>',
     image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4.5 17.5 4.8-4.4 3.4 3 2.6-2.3 4.2 3.7"/>',
     trash: '<path d="M4.8 6.9h14.4"/><path d="M9.7 6.9V4.8h4.6v2.1"/><path d="M6.7 6.9 7.6 19a1.2 1.2 0 0 0 1.2 1.1h6.4a1.2 1.2 0 0 0 1.2-1.1l.9-12.1"/><path d="M10.4 10.3v6.1M13.6 10.3v6.1"/>',
-    arrowDown: '<path d="M12 5.2v13.6"/><path d="m6.4 13.2 5.6 5.6 5.6-5.6"/>'
+    arrowDown: '<path d="M12 5.2v13.6"/><path d="m6.4 13.2 5.6 5.6 5.6-5.6"/>',
+    shield: '<path d="M12 3.5 5.5 6.1v5.4c0 4.2 2.7 7.3 6.5 8.5 3.8-1.2 6.5-4.3 6.5-8.5V6.1Z"/><path d="m9.1 11.9 2.1 2.1 3.7-4.1"/>'
   };
 
   /* ============================ 工具函数 ============================ */
@@ -514,6 +535,13 @@
       pluginDraft: null,
       personaAdd: null,
       providerForm: null,
+      /* 「功能」页：按群覆盖当前打开的群、新增群的输入框、试运行表单与结果。 */
+      commandGroup: '',
+      commandGroupInput: '',
+      commandGroupError: '',
+      commandTest: { content: '/help', scene: 'group', groupOpenid: '', senderOpenid: 'test-user', level: '' },
+      commandTestResult: null,
+      commandTestError: '',
       harnessAt: 0,
       kbSearch: '',
       kbUploadParent: '',
@@ -613,6 +641,12 @@
     state.ui.pluginDraft = null;
     state.ui.personaAdd = null;
     state.ui.providerForm = null;
+    state.ui.commandGroup = '';
+    state.ui.commandGroupInput = '';
+    state.ui.commandGroupError = '';
+    state.ui.commandTest = { content: '/help', scene: 'group', groupOpenid: '', senderOpenid: 'test-user', level: '' };
+    state.commandTestResult = null;
+    state.commandTestError = '';
     state.ui.credCurrent = '';
     state.ui.credPassword = '';
     state.ui.credConfirm = '';
@@ -874,7 +908,7 @@
     if (page && typeof page.after === 'function') page.after();
   }
 
-  var CONFIG_ROUTES = ['connect', 'bot', 'persona', 'capabilities', 'models', 'harness'];
+  var CONFIG_ROUTES = ['connect', 'bot', 'persona', 'commands', 'capabilities', 'models', 'harness'];
 
   /* 异步回调只在用户仍停留在对应页面时重绘，避免抢走输入焦点。 */
   function renderIf(route) {
@@ -1585,6 +1619,452 @@
         ${cardHead('实时预览', '随输入即时更新，与桥接实际注入的内容一致')}
         <div class="card-body">${previewView()}</div>
       </section>`;
+  }
+
+  /* ============================ 页面：功能 ============================ */
+
+  /* 草稿里的 commands 子对象：只读；要改动请先过 commandsDraft()。 */
+  function commandsView() {
+    return state.draft && state.draft.commands && typeof state.draft.commands === 'object' ? state.draft.commands : null;
+  }
+
+  function commandsDraft() {
+    if (!state.draft || typeof state.draft !== 'object') return {};
+    if (!state.draft.commands || typeof state.draft.commands !== 'object') state.draft.commands = {};
+    return state.draft.commands;
+  }
+
+  function commandLevelValid(level) {
+    return COMMAND_LEVELS.indexOf(String(level === null || level === undefined ? '' : level).trim()) >= 0;
+  }
+
+  function commandLevelLabel(level) {
+    return COMMAND_LEVEL_LABELS[level] || COMMAND_LEVEL_LABELS.member;
+  }
+
+  /* 某条指令当前的最低等级：levels.<id> 缺失或非法时退回 defaultLevel。 */
+  function commandLevelOf(id) {
+    var cfg = commandsView() || {};
+    var levels = cfg.levels && typeof cfg.levels === 'object' ? cfg.levels : {};
+    if (commandLevelValid(levels[id])) return String(levels[id]).trim();
+    if (commandLevelValid(cfg.defaultLevel)) return String(cfg.defaultLevel).trim();
+    return 'member';
+  }
+
+  /* 名单解析：数组或「每行 / 逗号一个」的文本都接受；去空、去重、截断到 200 条（与后端一致）。 */
+  function parseCommandMembers(value) {
+    var list = Array.isArray(value) ? value : String(value === null || value === undefined ? '' : value).split(/[\s,，;；]+/);
+    return cleanList(list).slice(0, COMMAND_MEMBERS_MAX);
+  }
+
+  function commandGroupIds() {
+    var cfg = commandsView() || {};
+    var groups = cfg.groups && typeof cfg.groups === 'object' ? cfg.groups : {};
+    return Object.keys(groups)
+      .filter(function (id) {
+        return String(id).trim() !== '' && groups[id] && typeof groups[id] === 'object';
+      })
+      .sort();
+  }
+
+  /* 取某个群的覆盖配置；create=false 时不存在就返回 null（不写草稿，只看不算修改）。 */
+  function commandGroupEntry(id, create) {
+    var wanted = String(id === null || id === undefined ? '' : id).trim();
+    if (wanted === '') return null;
+    var cfg = create ? commandsDraft() : commandsView();
+    if (!cfg) return null;
+    if (!cfg.groups || typeof cfg.groups !== 'object') {
+      if (!create) return null;
+      cfg.groups = {};
+    }
+    var entry = cfg.groups[wanted];
+    if (!entry || typeof entry !== 'object') {
+      if (!create) return null;
+      entry = { owners: [], admins: [], leveled: [], levels: {} };
+      cfg.groups[wanted] = entry;
+    }
+    if (create) {
+      ['owners', 'admins', 'leveled'].forEach(function (field) {
+        if (!Array.isArray(entry[field])) entry[field] = [];
+      });
+      if (!entry.levels || typeof entry.levels !== 'object') entry.levels = {};
+    }
+    return entry;
+  }
+
+  function commandGroupMembers(id, field) {
+    var entry = commandGroupEntry(id, false);
+    var list = entry && Array.isArray(entry[field]) ? entry[field] : [];
+    /* 显示也走过去重去空，看到的就是保存后会写进配置的内容。 */
+    return parseCommandMembers(list).slice(0, COMMAND_MEMBERS_MAX);
+  }
+
+  /* 群覆盖里的指令等级：'' 表示跟随全局。 */
+  function commandGroupScopedLevel(id, commandId) {
+    var entry = commandGroupEntry(id, false);
+    var levels = entry && entry.levels && typeof entry.levels === 'object' ? entry.levels : {};
+    return commandLevelValid(levels[commandId]) ? String(levels[commandId]).trim() : '';
+  }
+
+  /* commands 归一化：补全字段、等级只留白名单、名单去重去空并截断、群键去空。
+     base 是已保存的 commands：草稿缺字段时用它的值补齐（旧配置 / 别的页面改过的部分不会被打回默认值）。 */
+  function normalizeCommands(input, base) {
+    var saved = base && typeof base === 'object' ? base : {};
+    var src = input && typeof input === 'object' ? input : {};
+    var fallback = {
+      enabled: saved.enabled === undefined ? true : !!saved.enabled,
+      requireSlash: saved.requireSlash === undefined ? true : !!saved.requireSlash,
+      privateChatLevel: commandLevelValid(saved.privateChatLevel) ? String(saved.privateChatLevel).trim() : 'owner',
+      defaultLevel: commandLevelValid(saved.defaultLevel) ? String(saved.defaultLevel).trim() : 'member',
+      groupLevelThreshold: clampInt(saved.groupLevelThreshold, 0, 10000, 5)
+    };
+
+    /* 已保存的合法等级先全部留下（含以后新增的指令 id），再用草稿覆盖；草稿里的非法值表示删掉。 */
+    var levels = {};
+    var savedLevels = saved.levels && typeof saved.levels === 'object' ? saved.levels : {};
+    Object.keys(savedLevels).forEach(function (key) {
+      var id = String(key).trim().slice(0, 40);
+      if (id === '' || !commandLevelValid(savedLevels[key])) return;
+      levels[id] = String(savedLevels[key]).trim();
+    });
+    var srcLevels = src.levels && typeof src.levels === 'object' ? src.levels : {};
+    Object.keys(srcLevels).forEach(function (key) {
+      var id = String(key).trim().slice(0, 40);
+      if (id === '') return;
+      if (commandLevelValid(srcLevels[key])) levels[id] = String(srcLevels[key]).trim();
+      else delete levels[id];
+    });
+    /* 四条内置指令必须各有等级：缺失时用「其他指令默认等级」。 */
+    COMMAND_TABLE.forEach(function (command) {
+      if (!commandLevelValid(levels[command.id])) levels[command.id] = fallback.defaultLevel;
+    });
+
+    /* 群覆盖完全以草稿为准：删除某个群就是真的删掉，不从已保存配置里补回来。 */
+    var groups = {};
+    var srcGroups = src.groups && typeof src.groups === 'object' ? src.groups : {};
+    Object.keys(srcGroups).forEach(function (key) {
+      var id = String(key).trim().slice(0, 80);
+      var entry = srcGroups[key];
+      if (id === '' || entry === null || typeof entry !== 'object') return;
+      var scoped = {};
+      var scopedSource = entry.levels && typeof entry.levels === 'object' ? entry.levels : {};
+      Object.keys(scopedSource).forEach(function (commandKey) {
+        var commandId = String(commandKey).trim().slice(0, 40);
+        if (commandId === '' || !commandLevelValid(scopedSource[commandKey])) return;
+        scoped[commandId] = String(scopedSource[commandKey]).trim();
+      });
+      groups[id] = {
+        owners: parseCommandMembers(entry.owners),
+        admins: parseCommandMembers(entry.admins),
+        leveled: parseCommandMembers(entry.leveled),
+        levels: scoped
+      };
+    });
+
+    var threshold = src.groupLevelThreshold;
+    if (threshold === '' || threshold === null || threshold === undefined) threshold = fallback.groupLevelThreshold;
+
+    return {
+      enabled: src.enabled === null || src.enabled === undefined ? fallback.enabled : !!src.enabled,
+      requireSlash: src.requireSlash === null || src.requireSlash === undefined ? fallback.requireSlash : !!src.requireSlash,
+      privateChatLevel: commandLevelValid(src.privateChatLevel) ? String(src.privateChatLevel).trim() : fallback.privateChatLevel,
+      defaultLevel: commandLevelValid(src.defaultLevel) ? String(src.defaultLevel).trim() : fallback.defaultLevel,
+      groupLevelThreshold: clampInt(threshold, 0, 10000, fallback.groupLevelThreshold),
+      levels: levels,
+      groups: groups
+    };
+  }
+
+  /* 指令列表的一行：名称 + 说明 +「最低使用等级」。 */
+  function commandRowView(command) {
+    var level = commandLevelOf(command.id);
+    return html`<div class="cmd-row">
+      <div class="cmd-main">
+        <div class="cmd-title"><code class="cmd-name">${command.name}</code><span class="badge">${command.id}</span></div>
+        <div class="cmd-desc">${command.description}</div>
+      </div>
+      <div class="cmd-level">
+        <select class="select" data-path="commands.levels.${command.id}" data-type="select" data-ui="command-level"
+          data-command="${command.id}" aria-label="${command.name} 最低使用等级">
+          ${COMMAND_LEVEL_OPTIONS.map(function (option) {
+            return html`<option value="${option.value}" ${attrs({ selected: option.value === level })}>${option.label}</option>`;
+          })}
+        </select>
+      </div>
+    </div>`;
+  }
+
+  /* 群覆盖里的一行：指令 +「跟随全局 / 指定等级」。 */
+  function commandGroupRowView(id, command) {
+    var scoped = commandGroupScopedLevel(id, command.id);
+    var inherited = commandLevelLabel(commandLevelOf(command.id));
+    return html`<div class="cmd-row">
+      <div class="cmd-main">
+        <div class="cmd-title"><code class="cmd-name">${command.name}</code></div>
+        <div class="cmd-desc">${command.description}</div>
+      </div>
+      <div class="cmd-level">
+        <select class="select" data-ui="command-group-level" data-command="${command.id}" aria-label="${command.name} 在本群的等级">
+          <option value="" ${attrs({ selected: scoped === '' })}>跟随全局（${inherited}）</option>
+          ${COMMAND_LEVEL_OPTIONS.map(function (option) {
+            return html`<option value="${option.value}" ${attrs({ selected: option.value === scoped })}>${option.label}</option>`;
+          })}
+        </select>
+      </div>
+    </div>`;
+  }
+
+  function commandMemberBoxView(id, field, label, hint) {
+    var list = commandGroupMembers(id, field);
+    var boxId = 'cmd-group-' + field;
+    return html`<label class="cmd-member" for="${boxId}">
+      <span class="field-label">${label}</span>
+      <textarea class="textarea" id="${boxId}" rows="5" data-ui="command-group-members" data-field="${field}"
+        placeholder="每行一个 member_openid" aria-label="${label}">${list.join('\n')}</textarea>
+      <span class="form-hint">${hint}；每行一个，最多 ${COMMAND_MEMBERS_MAX} 条</span>
+    </label>`;
+  }
+
+  function commandGroupEditorView(id) {
+    return html`<div class="cmd-group-editor">
+      <div class="cmd-group-head">
+        <div class="cmd-group-title">当前群：<code>${id}</code></div>
+        <button type="button" class="btn btn-sm btn-danger" data-act="command-group-remove" data-group="${id}"
+          data-confirm="确定删除该群的覆盖配置吗？三份名单与等级覆盖会一起删除。">删除该群配置</button>
+      </div>
+      <div class="cmd-members">
+        ${commandMemberBoxView(id, 'owners', '群主名单', '这些成员在本群按「群主」处理')}
+        ${commandMemberBoxView(id, 'admins', '管理员名单', '这些成员在本群按「管理员」处理')}
+        ${commandMemberBoxView(id, 'leveled', '达标成员名单', '手工指定「达到自定义群等级」的成员，不看活跃度')}
+      </div>
+      <div class="cmd-list">
+        ${COMMAND_TABLE.map(function (command) {
+          return commandGroupRowView(id, command);
+        })}
+      </div>
+    </div>`;
+  }
+
+  function commandGroupCardView() {
+    var cfg = commandsView() || {};
+    var groups = cfg.groups && typeof cfg.groups === 'object' ? cfg.groups : {};
+    var ids = commandGroupIds();
+    var current = String(state.ui.commandGroup || '');
+    /* 刚新增、还没写进草稿的群也要出现在下拉里，否则界面会「跳回去」。 */
+    if (current !== '' && ids.indexOf(current) < 0) ids = ids.concat([current]).sort();
+    return html`<section class="card">
+      ${cardHead('按群覆盖', '给单个群单独指定群主 / 管理员 / 达标成员名单，以及某条指令的等级要求')}
+      <div class="card-body">
+        <div class="form-row">
+          <div class="form-label"><label for="cmd-group-pick">已配置的群</label><div class="form-hint">共 ${ids.length} 个</div></div>
+          <div class="form-control">
+            <select class="select" id="cmd-group-pick" data-ui="command-group-pick" aria-label="选择要配置的群">
+              <option value="" ${attrs({ selected: current === '' })}>（未选择）</option>
+              ${ids.map(function (id) {
+                var item = groups[id] && typeof groups[id] === 'object' ? groups[id] : {};
+                var counts = ['owners', 'admins', 'leveled'].map(function (field) {
+                  return Array.isArray(item[field]) ? item[field].length : 0;
+                });
+                return html`<option value="${id}" ${attrs({ selected: id === current })}>${id}（群主 ${counts[0]} · 管理员 ${counts[1]} · 达标 ${counts[2]}）</option>`;
+              })}
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-label"><label for="cmd-group-input">新增群</label><div class="form-hint">粘贴群 openid 后点「新增 / 打开」</div></div>
+          <div class="form-control">
+            <div class="form-control-row">
+              <input class="input" id="cmd-group-input" type="text" data-ui="command-group-input" value="${state.ui.commandGroupInput}"
+                placeholder="群 openid，例如 1A2B3C4D…">
+              <button type="button" class="btn" data-act="command-group-add">新增 / 打开</button>
+            </div>
+            ${state.ui.commandGroupError ? html`<div class="form-error">${state.ui.commandGroupError}</div>` : ''}
+          </div>
+        </div>
+        ${current === ''
+          ? html`<div class="empty">还没有选择群。选一个已配置的群，或粘贴群 openid 新增；新增的群改动一次（填名单或改等级）才会写进配置。</div>`
+          : commandGroupEditorView(current)}
+      </div>
+    </section>`;
+  }
+
+  function commandTestForm() {
+    if (!state.ui.commandTest || typeof state.ui.commandTest !== 'object') {
+      state.ui.commandTest = { content: '/help', scene: 'group', groupOpenid: '', senderOpenid: 'test-user', level: '' };
+    }
+    return state.ui.commandTest;
+  }
+
+  function commandTestCardView() {
+    var form = commandTestForm();
+    var result = state.commandTestResult;
+    return html`<section class="card">
+      ${cardHead('试运行', '不用去 QQ 里试：按指定身份跑一遍指令，直接看机器人会回什么')}
+      <div class="card-body">
+        <div class="form-row">
+          <div class="form-label"><label for="cmd-test-content">指令内容</label><div class="form-hint">例如 /help、/切换人设 喵酱</div></div>
+          <div class="form-control">
+            <input class="input" id="cmd-test-content" type="text" data-ui="command-test-content" value="${form.content}" placeholder="/help">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-label"><label for="cmd-test-scene">场景</label><div class="form-hint">群聊看群名单与活跃度，私聊看「私聊默认等级」</div></div>
+          <div class="form-control">
+            <div class="form-control-row">
+              <select class="select" id="cmd-test-scene" data-ui="command-test-scene" aria-label="测试场景">
+                <option value="group" ${attrs({ selected: form.scene !== 'c2c' })}>群聊</option>
+                <option value="c2c" ${attrs({ selected: form.scene === 'c2c' })}>私聊</option>
+              </select>
+              <input class="input" type="text" data-ui="command-test-group" value="${form.groupOpenid}"
+                placeholder="群 openid（私聊可留空）" aria-label="测试用的群 openid">
+            </div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-label"><label for="cmd-test-sender">发送者 openid</label><div class="form-hint">用来对照名单与活跃度</div></div>
+          <div class="form-control">
+            <div class="form-control-row">
+              <input class="input" id="cmd-test-sender" type="text" data-ui="command-test-sender" value="${form.senderOpenid}"
+                placeholder="test-user">
+              <select class="select" data-ui="command-test-level" aria-label="测试用的身份等级">
+                <option value="" ${attrs({ selected: !commandLevelValid(form.level) })}>身份自动推断</option>
+                ${COMMAND_LEVEL_OPTIONS.map(function (option) {
+                  return html`<option value="${option.value}" ${attrs({ selected: commandLevelValid(form.level) && option.value === form.level })}>${option.label}</option>`;
+                })}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="actions-row">
+          <button type="button" class="btn btn-primary" data-act="command-test-run" data-busy="command-test">${icon('check')}<span>测试</span></button>
+          <span class="muted">只读试跑：不改配置、不发消息；跑的是已保存的配置，改完等级记得先保存。</span>
+        </div>
+        ${state.commandTestError ? html`<div class="form-error" id="command-test-error">${state.commandTestError}</div>` : ''}
+        <pre class="preview" id="command-test-result">${result && result.message ? result.message : '还没有试运行结果。'}</pre>
+      </div>
+    </section>`;
+  }
+
+  function renderCommands() {
+    if (!state.draft) return errorView('配置尚未加载');
+    return html`
+      ${actionBarView()}
+
+      <section class="card">
+        ${cardHead('全局开关', '指令是否生效、私聊按哪个等级、群内活跃度门槛多少')}
+        <div class="card-body">
+          <div class="hint-box">QQ 群机器人的消息事件里只有 <code>member_openid</code>，<strong>拿不到群主、管理员和群等级</strong>，所以群主 / 管理员 / 达标成员名单都要在本页手工维护；「达到自定义群等级」用的是机器人自己统计的群内活跃度（该成员在本群的消息条数）。</div>
+          ${rowSwitch('启用指令', '关闭后所有 / 指令都不响应，普通聊天不受影响', 'commands.enabled')}
+          ${rowSwitch('必须带 / 前缀', '开启后只有以 / 或 ／ 开头的消息才会被当成指令', 'commands.requireSlash')}
+          ${rowSelect('私聊默认等级', '私聊里没有群角色，把对方当作哪个等级', 'commands.privateChatLevel', COMMAND_LEVEL_OPTIONS)}
+          ${rowNumber('群等级门槛', '某成员在本群的消息条数达到这个数，就算「达到群等级的成员」', 'commands.groupLevelThreshold', 0, 10000, 1, '条消息')}
+          ${rowSelect('其他指令默认等级', '配置里没有单独列出的指令用这个等级', 'commands.defaultLevel', COMMAND_LEVEL_OPTIONS)}
+        </div>
+      </section>
+
+      <section class="card">
+        ${cardHead('指令列表', '每条指令的最低使用等级；群聊按名单与活跃度判断，私聊看「私聊默认等级」')}
+        <div class="card-body">
+          <div class="cmd-list">${COMMAND_TABLE.map(commandRowView)}</div>
+        </div>
+      </section>
+
+      ${commandGroupCardView()}
+
+      ${commandTestCardView()}`;
+  }
+
+  /* ------------------------------ 动作：功能页 ------------------------------ */
+
+  function addCommandGroup() {
+    var raw = String(state.ui.commandGroupInput || '').trim();
+    if (raw === '') {
+      state.ui.commandGroupError = '请输入群 openid';
+      renderIf('commands');
+      return;
+    }
+    if (raw.length > 80) {
+      state.ui.commandGroupError = '群 openid 最长 80 个字符';
+      renderIf('commands');
+      return;
+    }
+    state.ui.commandGroupError = '';
+    state.ui.commandGroupInput = '';
+    state.ui.commandGroup = raw;
+    renderIf('commands');
+  }
+
+  function removeCommandGroup(id) {
+    var wanted = String(id === null || id === undefined ? '' : id).trim();
+    if (wanted === '') return;
+    var cfg = commandsView();
+    var groups = cfg && cfg.groups && typeof cfg.groups === 'object' ? cfg.groups : null;
+    if (groups && Object.prototype.hasOwnProperty.call(groups, wanted)) delete groups[wanted];
+    if (String(state.ui.commandGroup || '') === wanted) state.ui.commandGroup = '';
+    syncDirtyUI();
+    renderIf('commands');
+  }
+
+  function setCommandGroupMembers(field, text) {
+    var id = String(state.ui.commandGroup || '').trim();
+    if (id === '') return;
+    if (field !== 'owners' && field !== 'admins' && field !== 'leveled') return;
+    var entry = commandGroupEntry(id, true);
+    entry[field] = parseCommandMembers(text);
+    syncDirtyUI();
+  }
+
+  function setCommandGroupLevel(commandId, level) {
+    var id = String(state.ui.commandGroup || '').trim();
+    if (id === '' || !commandId) return;
+    var entry = commandGroupEntry(id, true);
+    if (commandLevelValid(level)) entry.levels[commandId] = String(level).trim();
+    else delete entry.levels[commandId];
+    syncDirtyUI();
+  }
+
+  /* 试运行：只调用后端已有的 test-command，不写配置、不发 QQ 消息。 */
+  function runCommandTest() {
+    if (isBusy('command-test')) return;
+    var form = commandTestForm();
+    var content = String(form.content || '').trim();
+    if (content === '') {
+      toast('error', '请输入要测试的指令内容，例如 /help');
+      return;
+    }
+    var scene = form.scene === 'c2c' ? 'c2c' : 'group';
+    var payload = {
+      content: content,
+      scene: scene,
+      groupOpenid: scene === 'group' ? String(form.groupOpenid || '').trim() : '',
+      senderOpenid: String(form.senderOpenid || '').trim() || 'test-user'
+    };
+    /* level 留空时由后端按名单 + 活跃度推断。 */
+    if (commandLevelValid(form.level)) payload.level = String(form.level).trim();
+    state.commandTestError = '';
+    busySet('command-test', true);
+    syncBusy();
+    api('/control', { method: 'POST', body: { action: 'test-command', payload: payload } })
+      .then(function (res) {
+        var message = res && typeof res.message === 'string' && res.message !== '' ? res.message : '（服务端没有返回内容）';
+        state.commandTestResult = { ok: !(res && res.ok === false), message: message };
+        if (res && res.ok === false) state.commandTestError = '这次试运行后端返回了失败，请看下面的回复。';
+      })
+      .catch(function (err) {
+        if (!err) return;
+        state.commandTestResult = null;
+        if (err.status === 400) {
+          /* 旧服务端没有注册 test-command：给一句能看懂的说明，不当作异常刷屏。 */
+          state.commandTestError = '当前服务端还没有提供 test-command 试运行接口（' + (err.message || 'HTTP 400') + '）。';
+        } else if (err.status !== 401) {
+          state.commandTestError = err.message || '试运行失败';
+        }
+      })
+      .then(function () {
+        busySet('command-test', false);
+        syncBusy();
+        renderIf('commands');
+      });
   }
 
   /* ============================ 页面：能力 ============================ */
@@ -3100,6 +3580,12 @@
       render: renderPersona,
       after: null
     },
+    commands: {
+      title: '功能',
+      subtitle: '四条内置指令的开关、最低使用等级与按群权限覆盖',
+      render: renderCommands,
+      after: null
+    },
     capabilities: {
       title: '能力',
       subtitle: '工具调用、联网检索与生图',
@@ -3161,6 +3647,7 @@
     overview: ['overview'],
     bot: ['config'],
     persona: ['config'],
+    commands: ['config'],
     capabilities: ['config', 'overview'],
     models: ['config', 'models', 'overview'],
     kb: ['knowledge'],
@@ -3480,6 +3967,9 @@
     });
 
     models.providers = Array.isArray(models.providers) ? models.providers : [];
+
+    /* 功能页：指令开关、等级白名单、名单去重与群覆盖；缺字段用已保存的 commands 补齐。 */
+    cfg.commands = normalizeCommands(cfg.commands, state.config && state.config.commands);
 
     return cfg;
   }
@@ -5315,6 +5805,15 @@
       case 'persona-add-submit':
         submitPersonaAdd();
         break;
+      case 'command-group-add':
+        addCommandGroup();
+        break;
+      case 'command-group-remove':
+        removeCommandGroup(el.getAttribute('data-group'));
+        break;
+      case 'command-test-run':
+        runCommandTest();
+        break;
       case 'img-preset':
         applyImagePreset(el.getAttribute('data-preset'));
         break;
@@ -5500,6 +5999,13 @@
       state.ui.logQuery = el.value;
       patchLogView();
     } else if (ui.indexOf('persona-add-') === 0 && el.type !== 'checkbox') updatePersonaAddField(ui, el.value);
+    else if (ui === 'command-group-input') {
+      state.ui.commandGroupInput = el.value;
+      if (state.ui.commandGroupError) state.ui.commandGroupError = '';
+    } else if (ui === 'command-group-members') setCommandGroupMembers(el.getAttribute('data-field'), el.value);
+    else if (ui === 'command-test-content') commandTestForm().content = el.value;
+    else if (ui === 'command-test-sender') commandTestForm().senderOpenid = el.value;
+    else if (ui === 'command-test-group') commandTestForm().groupOpenid = el.value;
   }
 
   function onChange(ev) {
@@ -5547,6 +6053,29 @@
     }
     if (ui === 'kb-upload-parent') {
       state.ui.kbUploadParent = el.value;
+      return;
+    }
+    if (ui === 'command-level') {
+      /* 全局「最低使用等级」：写进 commands.levels.<指令 id>。 */
+      applyPathControl(el);
+      return;
+    }
+    if (ui === 'command-group-pick') {
+      state.ui.commandGroup = el.value;
+      state.ui.commandGroupError = '';
+      renderIf('commands');
+      return;
+    }
+    if (ui === 'command-group-level') {
+      setCommandGroupLevel(el.getAttribute('data-command'), el.value);
+      return;
+    }
+    if (ui === 'command-test-scene') {
+      commandTestForm().scene = el.value === 'c2c' ? 'c2c' : 'group';
+      return;
+    }
+    if (ui === 'command-test-level') {
+      commandTestForm().level = commandLevelValid(el.value) ? String(el.value).trim() : '';
       return;
     }
     if (ui === 'kind-provider' || ui === 'kind-model') {
