@@ -96,6 +96,10 @@
     { id: 'blank', label: '空模板', persona: { name: null, role: '', style: '', rules: '' } }
   ];
 
+  /* 人设档案：与后端一致，最多保留 8 份；id 只使用小写字母、数字与连字符。 */
+  var PERSONA_PROFILE_LIMIT = 8;
+  var PERSONA_ID_MAX = 32;
+
   /* 与 bridge/lib/runtime.js 的 IMAGE_PROVIDER_PRESETS 保持一致。 */
   var IMAGE_PRESETS = {
     siliconflow: { label: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', model: 'Kwai-Kolors/Kolors' },
@@ -508,6 +512,7 @@
       installUrl: '',
       pluginEdit: null,
       pluginDraft: null,
+      personaAdd: null,
       providerForm: null,
       harnessAt: 0,
       kbSearch: '',
@@ -606,6 +611,7 @@
     state.busy = {};
     state.ui.pluginEdit = null;
     state.ui.pluginDraft = null;
+    state.ui.personaAdd = null;
     state.ui.providerForm = null;
     state.ui.credCurrent = '';
     state.ui.credPassword = '';
@@ -1321,11 +1327,228 @@
     host.textContent = text === '' ? '（当前提示词为空，请至少填写角色或启用完全自定义）' : text;
   }
 
+  /* ------------------------- 人设档案（可切换人设） ------------------------- */
+
+  /* 档案数组：非数组或混在里面的脏数据一律忽略；空数组表示「还没有档案」。 */
+  function personaProfiles(persona) {
+    var list = persona && Array.isArray(persona.personaProfiles) ? persona.personaProfiles : [];
+    return list.filter(function (item) {
+      return !!item && typeof item === 'object';
+    });
+  }
+
+  /* 草稿里的 persona：缺失时补一个空对象，避免后续写入落到 undefined 上。 */
+  function personaDraft() {
+    if (!state.draft) return null;
+    var persona = state.draft.persona;
+    if (!persona || typeof persona !== 'object') {
+      persona = {};
+      state.draft.persona = persona;
+    }
+    return persona;
+  }
+
+  function personaActiveId(persona) {
+    return String(textOf(persona && persona.activePersonaId, '')).trim();
+  }
+
+  function personaProfileById(persona, id) {
+    var list = personaProfiles(persona);
+    var wanted = String(textOf(id, '')).trim();
+    for (var i = 0; i < list.length; i += 1) {
+      if (textOf(list[i].id, '') === wanted) return list[i];
+    }
+    return null;
+  }
+
+  /* 档案内容与当前人设字段是否完全一致（一致时「启用」没有实际变化）。 */
+  function personaSameAsProfile(persona, profile) {
+    if (!persona || !profile) return false;
+    var keys = ['name', 'role', 'style', 'rules', 'custom'];
+    for (var i = 0; i < keys.length; i += 1) {
+      if (textOf(persona[keys[i]], '') !== textOf(profile[keys[i]], '')) return false;
+    }
+    return !!persona.useCustom === !!profile.useCustom;
+  }
+
+  /* label → 纯 ASCII 安全 id：小写字母、数字、连字符；全中文标签退回 persona。 */
+  function personaSlug(label) {
+    var slug = String(textOf(label, ''))
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, PERSONA_ID_MAX)
+      .replace(/-+$/g, '');
+    return slug === '' ? 'persona' : slug;
+  }
+
+  /* id 冲突时补 -2 / -3…，并截断到 PERSONA_ID_MAX 以内，保证结果仍然唯一。 */
+  function personaMakeId(label, list) {
+    var taken = {};
+    (list || []).forEach(function (item) {
+      taken[textOf(item && item.id, '')] = true;
+    });
+    var base = personaSlug(label);
+    if (!taken[base]) return base;
+    var index = 2;
+    var candidate = base;
+    do {
+      var suffix = '-' + index;
+      candidate = base.slice(0, PERSONA_ID_MAX - suffix.length) + suffix;
+      index += 1;
+    } while (taken[candidate]);
+    return candidate;
+  }
+
+  /* 新增档案的基本校验：返回错误文案，通过时返回空字符串。 */
+  function personaLabelError(label, list) {
+    var text = String(textOf(label, '')).trim();
+    var items = list || [];
+    if (text === '') return '请先填写档案名';
+    var duplicated = items.some(function (item) {
+      return String(textOf(item && item.label, '')).trim().toLowerCase() === text.toLowerCase();
+    });
+    if (duplicated) return '已存在名为「' + text + '」的人设档案，换一个名字吧';
+    if (items.length >= PERSONA_PROFILE_LIMIT) {
+      return '最多只能保存 ' + PERSONA_PROFILE_LIMIT + ' 份人设档案，请先删掉一份';
+    }
+    return '';
+  }
+
+  /* 启用档案 = 把档案字段抄进 persona 的同名字段，并记录 activePersonaId。 */
+  function personaApplyProfile(persona, profile) {
+    if (!persona || !profile) return false;
+    ['name', 'role', 'style', 'rules', 'custom'].forEach(function (key) {
+      persona[key] = textOf(profile[key], '');
+    });
+    persona.useCustom = !!profile.useCustom;
+    persona.activePersonaId = textOf(profile.id, '');
+    return true;
+  }
+
+  /* 删除档案：始终保留至少一份；删掉的若是当前档案，自动启用剩下的第一份。 */
+  function personaRemoveProfile(persona, id) {
+    var list = personaProfiles(persona);
+    var wanted = String(textOf(id, '')).trim();
+    var found = null;
+    list.forEach(function (item) {
+      if (textOf(item.id, '') === wanted) found = item;
+    });
+    if (!found) return { ok: false, message: '找不到这份人设档案' };
+    if (list.length <= 1) return { ok: false, message: '至少要保留一份人设档案，不能删除最后一份' };
+    var next = list.filter(function (item) {
+      return textOf(item.id, '') !== wanted;
+    });
+    persona.personaProfiles = next;
+    var active = personaActiveId(persona) === wanted;
+    if (active) personaApplyProfile(persona, next[0]);
+    return { ok: true, active: active, next: next[0], label: textOf(found.label, wanted) };
+  }
+
+  /* 新增表单草稿：展开 / 收起只切 open，输入内容一直留在 state 里。 */
+  function personaAddForm() {
+    var form = state.ui.personaAdd;
+    if (!form || typeof form !== 'object') {
+      form = { open: false, label: '', name: '', role: '', style: '', rules: '', activate: true, error: '' };
+      state.ui.personaAdd = form;
+    }
+    return form;
+  }
+
+  function personaAddView() {
+    var form = personaAddForm();
+    return html`<div class="persona-form">
+      <div class="persona-form-grid">
+        <label class="field">
+          <span class="field-label">档案名（必填）</span>
+          <input class="input" id="persona-add-label" type="text" data-ui="persona-add-label" value="${form.label}"
+            maxlength="40" autocomplete="off" placeholder="例如：猫娘 / 工作模式">
+        </label>
+        <label class="field">
+          <span class="field-label">角色自称</span>
+          <input class="input" id="persona-add-name" type="text" data-ui="persona-add-name" value="${form.name}"
+            maxlength="40" autocomplete="off" placeholder="例如：喵酱">
+        </label>
+      </div>
+      <label class="field">
+        <span class="field-label">角色设定</span>
+        <textarea class="textarea" id="persona-add-role" rows="3" data-ui="persona-add-role"
+          placeholder="它是谁、擅长什么">${form.role}</textarea>
+      </label>
+      <label class="field">
+        <span class="field-label">说话风格</span>
+        <textarea class="textarea" id="persona-add-style" rows="3" data-ui="persona-add-style"
+          placeholder="语气、长度、表达习惯">${form.style}</textarea>
+      </label>
+      <label class="field">
+        <span class="field-label">必须遵守的规则</span>
+        <textarea class="textarea" id="persona-add-rules" rows="3" data-ui="persona-add-rules"
+          placeholder="硬性约束，每条一行更清晰">${form.rules}</textarea>
+      </label>
+      <label class="persona-check">
+        <input type="checkbox" data-ui="persona-add-activate" ${attrs({ checked: form.activate })}>
+        <span>添加后立即启用</span>
+      </label>
+      <div class="persona-form-actions">
+        <button type="button" class="btn btn-primary" data-act="persona-add-submit">添加档案</button>
+        <span class="muted">新档案使用上面的字段组成人设（不使用完全自定义提示词），添加后不会自动保存。</span>
+      </div>
+      <div class="form-error" id="persona-add-error">${form.error}</div>
+    </div>`;
+  }
+
+  function personaProfileRowView(persona, profile) {
+    var id = textOf(profile.id, '');
+    var label = textOf(profile.label, id === '' ? '未命名档案' : id);
+    var name = String(textOf(profile.name, '')).trim();
+    var active = personaActiveId(persona) !== '' && personaActiveId(persona) === id;
+    var only = personaProfiles(persona).length <= 1;
+    return html`<div class="persona-item${active ? ' is-active' : ''}">
+      <div class="persona-main">
+        <span class="persona-name">${label}</span>
+        <span class="persona-sub">${name === '' ? '（未设置角色自称）' : '自称：' + name}</span>
+        ${active ? html`<span class="badge badge-accent">当前</span>` : ''}
+        ${profile.useCustom ? html`<span class="badge">完全自定义</span>` : ''}
+      </div>
+      <div class="persona-actions">
+        <button type="button" class="btn btn-sm" data-act="persona-activate" data-id="${id}">启用</button>
+        <button type="button" class="btn btn-sm btn-danger" data-act="persona-delete" data-id="${id}"
+          title="${only ? '至少要保留一份人设档案' : '删除这份人设档案'}">删除</button>
+      </div>
+    </div>`;
+  }
+
+  function personaProfilesView(persona) {
+    var list = personaProfiles(persona);
+    var form = personaAddForm();
+    var activeId = personaActiveId(persona);
+    var known = activeId !== '' && !!personaProfileById(persona, activeId);
+    var hint = '「启用」会把档案内容写进下方的人设字段（含关闭「完全自定义」），但不会自动保存：随时可以「放弃修改」恢复，或点「保存修改」生效。';
+    if (list.length > 0 && !known) {
+      hint = '当前人设字段还没有对应到列表里的任何档案（可能是旧配置，或直接编辑过字段），点某份档案的「启用」就能把它设为当前档案。' + hint;
+    }
+    return html`<section class="card">
+      ${cardHead('人设档案', '最多 ' + PERSONA_PROFILE_LIMIT + ' 份，可以一键切换；「启用」只改下方的人设字段，保存后才写入服务器',
+        html`<button type="button" class="btn" data-act="persona-add-toggle" aria-expanded="${form.open ? 'true' : 'false'}">${form.open ? '' : icon('plus')}<span>${form.open ? '收起表单' : '添加人设'}</span></button>`)}
+      <div class="card-body">
+        ${list.length === 0
+          ? html`<div class="empty">还没有任何人设档案。点右上角「添加人设」建一份，之后就能在多种角色之间快速切换。</div>`
+          : html`<div class="persona-list">${list.map(function (profile) {
+              return personaProfileRowView(persona, profile);
+            })}</div>`}
+        <div class="hint-box">${hint}</div>
+        ${form.open ? personaAddView() : ''}
+      </div>
+    </section>`;
+  }
+
   function renderPersona() {
     if (!state.draft) return errorView('配置尚未加载');
     var persona = state.draft.persona || {};
     return html`
       ${actionBarView()}
+      ${personaProfilesView(persona)}
       <section class="card">
         ${cardHead('人设', '这些字段会拼接成 QQ 会话的系统提示词')}
         <div class="card-body">
@@ -4404,6 +4627,126 @@
     toast('info', '已应用预设「' + preset.label + '」，记得保存');
   }
 
+  /* --------------------------- 动作：人设档案 --------------------------- */
+
+  /* 启用：只改草稿，随后整页重绘，输入框立刻显示新档案的 name / role / style / rules。 */
+  function activatePersonaProfile(id) {
+    var persona = personaDraft();
+    if (!persona) return;
+    var profile = personaProfileById(persona, id);
+    if (!profile) {
+      toast('error', '找不到这份人设档案，可能已经被删除了');
+      return;
+    }
+    var label = textOf(profile.label, textOf(profile.id, ''));
+    if (personaActiveId(persona) === textOf(profile.id, '') && personaSameAsProfile(persona, profile)) {
+      toast('info', '「' + label + '」已经是当前档案');
+      return;
+    }
+    personaApplyProfile(persona, profile);
+    renderContent();
+    toast('info', '已启用「' + label + '」，保存后生效');
+  }
+
+  function deletePersonaProfile(id) {
+    var persona = personaDraft();
+    if (!persona) return;
+    var profile = personaProfileById(persona, id);
+    if (!profile) {
+      toast('error', '找不到这份人设档案，可能已经被删除了');
+      return;
+    }
+    /* 最后一份不能删：先拦下来，连确认框都不弹。 */
+    if (personaProfiles(persona).length <= 1) {
+      toast('error', '至少要保留一份人设档案，不能删除最后一份');
+      return;
+    }
+    var label = textOf(profile.label, textOf(profile.id, ''));
+    var active = personaActiveId(persona) === textOf(profile.id, '');
+    var question = active
+      ? '「' + label + '」正在启用中，删除后会自动启用剩下的第一份档案。确定删除吗？（不会立刻写入服务器）'
+      : '确定删除人设档案「' + label + '」吗？（不会立刻写入服务器）';
+    if (!window.confirm(question)) return;
+    var result = personaRemoveProfile(persona, id);
+    if (!result.ok) {
+      toast('error', result.message);
+      return;
+    }
+    renderContent();
+    if (result.active && result.next) {
+      toast('success', '已删除「' + label + '」，并自动启用「' + textOf(result.next.label, textOf(result.next.id, '')) + '」，记得保存');
+    } else {
+      toast('success', '已删除「' + label + '」，记得保存');
+    }
+  }
+
+  function togglePersonaAdd() {
+    var form = personaAddForm();
+    form.open = !form.open;
+    renderContent();
+    if (!form.open) return;
+    var input = document.getElementById('persona-add-label');
+    if (input && typeof input.focus === 'function') input.focus();
+  }
+
+  /* data-ui="persona-add-*" 的输入回写；收起 / 展开只是切换 open，内容一直留着。 */
+  function updatePersonaAddField(ui, value) {
+    var form = personaAddForm();
+    var field = String(ui).replace(/^persona-add-/, '');
+    if (field === 'activate') {
+      form.activate = !!value;
+      return;
+    }
+    if (['label', 'name', 'role', 'style', 'rules'].indexOf(field) < 0) return;
+    form[field] = value === null || value === undefined ? '' : String(value);
+    if (form.error !== '') {
+      form.error = '';
+      var box = document.getElementById('persona-add-error');
+      if (box) box.textContent = '';
+    }
+  }
+
+  function resetPersonaAddForm() {
+    state.ui.personaAdd = { open: false, label: '', name: '', role: '', style: '', rules: '', activate: true, error: '' };
+  }
+
+  function submitPersonaAdd() {
+    var persona = personaDraft();
+    if (!persona) return;
+    var form = personaAddForm();
+    var list = personaProfiles(persona);
+    var pick = function (key) {
+      return String(textOf(form[key], '')).trim();
+    };
+    var label = pick('label');
+    var error = personaLabelError(label, list);
+    if (error !== '') {
+      form.error = error;
+      form.open = true;
+      renderContent();
+      toast('error', error);
+      var box = document.getElementById('persona-add-label');
+      if (box && typeof box.focus === 'function') box.focus();
+      return;
+    }
+    var profile = {
+      id: personaMakeId(label, list),
+      label: label,
+      name: pick('name'),
+      role: pick('role'),
+      style: pick('style'),
+      rules: pick('rules'),
+      useCustom: false,
+      custom: ''
+    };
+    persona.personaProfiles = list.concat([profile]);
+    var activate = !!form.activate;
+    if (activate) personaApplyProfile(persona, profile);
+    resetPersonaAddForm();
+    renderContent();
+    toast('success', activate ? '已添加并启用「' + label + '」，记得保存' : '已添加档案「' + label + '」，记得保存');
+  }
+
   function applyImagePreset(id) {
     var preset = IMAGE_PRESETS[id];
     if (!preset || !state.draft) return;
@@ -4960,6 +5303,18 @@
       case 'persona-preset':
         applyPersonaPreset(el.getAttribute('data-preset'));
         break;
+      case 'persona-activate':
+        activatePersonaProfile(el.getAttribute('data-id'));
+        break;
+      case 'persona-delete':
+        deletePersonaProfile(el.getAttribute('data-id'));
+        break;
+      case 'persona-add-toggle':
+        togglePersonaAdd();
+        break;
+      case 'persona-add-submit':
+        submitPersonaAdd();
+        break;
       case 'img-preset':
         applyImagePreset(el.getAttribute('data-preset'));
         break;
@@ -5144,7 +5499,7 @@
       /* 客户端过滤：即时重绘显示，不发请求、不动游标。 */
       state.ui.logQuery = el.value;
       patchLogView();
-    }
+    } else if (ui.indexOf('persona-add-') === 0 && el.type !== 'checkbox') updatePersonaAddField(ui, el.value);
   }
 
   function onChange(ev) {
@@ -5180,6 +5535,10 @@
     }
     if (ui === 'log-follow') {
       setLogFollow(!!el.checked);
+      return;
+    }
+    if (ui === 'persona-add-activate') {
+      updatePersonaAddField(ui, !!el.checked);
       return;
     }
     if (ui === 'harness-provider' || ui === 'harness-model') {

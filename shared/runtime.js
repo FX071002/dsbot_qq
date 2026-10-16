@@ -19,6 +19,67 @@ export const BASE_DEPLOYMENT_PROMPT = [
 ].join('\n')
 
 /** Persona templates offered by the dashboard. */
+/**
+ * 多份人设档案：切换人设只改 `persona`，其余能力配置（工具、知识库、联网、模型）一律不动。
+ * label 是给人看的档案名，name 是角色自称。
+ */
+/** 归一化人设档案数组：过滤空项、限制长度与字段。 */
+function profileList(value, fallback) {
+  const source = Array.isArray(value) ? value : Array.isArray(fallback) ? fallback : []
+  const list = []
+  for (const [index, item] of source.entries()) {
+    if (item === null || typeof item !== 'object') continue
+    const label = String(item.label ?? '').trim()
+    const id = String(item.id ?? '').trim() || `persona-${index + 1}`
+    if (label === '') continue
+    list.push({
+      id: id.slice(0, 40),
+      label: label.slice(0, 40),
+      name: String(item.name ?? label).trim().slice(0, 40),
+      role: String(item.role ?? '').slice(0, 4000),
+      style: String(item.style ?? '').slice(0, 2000),
+      rules: String(item.rules ?? '').slice(0, 4000),
+      useCustom: item.useCustom === true,
+      custom: String(item.custom ?? '').slice(0, 8000)
+    })
+    if (list.length >= 8) break
+  }
+  return list.length > 0 ? list : DEFAULT_PERSONA_PROFILES.map((item) => ({ ...item }))
+}
+
+export const DEFAULT_PERSONA_PROFILES = [
+  {
+    id: 'default',
+    label: '默认助手',
+    name: '小助手',
+    role: '大肥鱼养的 QQ 助手，能聊天、查资料、写东西、处理文件。',
+    style: '口语化、简洁直接，先结论后理由。',
+    rules: '回答控制在 300 字以内；需要更多细节时主动问用户要不要展开。',
+    useCustom: false,
+    custom: ''
+  }
+]
+
+/**
+ * 按档案名 / id / 序号找一份人设。
+ * @param profiles - 人设档案数组。
+ * @param query - 用户写的名字（支持「1」「2」这样的序号）。
+ * @returns 命中的档案，找不到返回 undefined。
+ */
+export function resolvePersonaProfile(profiles, query) {
+  const wanted = String(query ?? '').trim().toLowerCase()
+  if (wanted === '') return undefined
+  const list = Array.isArray(profiles) ? profiles : []
+  const index = Number(wanted)
+  if (Number.isInteger(index) && index >= 1 && index <= list.length) return list[index - 1]
+  return (
+    list.find((item) => String(item.id).toLowerCase() === wanted) ??
+    list.find((item) => String(item.label).toLowerCase() === wanted) ??
+    list.find((item) => String(item.label).toLowerCase().includes(wanted)) ??
+    list.find((item) => String(item.name).toLowerCase().includes(wanted))
+  )
+}
+
 export const PERSONA_PRESETS = [
   {
     id: 'assistant',
@@ -104,6 +165,9 @@ export function defaultRuntimeConfig() {
       ackText: '🤖 已收到，正在处理，请稍候…',
       welcomeGroupText: '大家好，我是大肥鱼的QQ机器人，在群里 @我 就能对话。',
       welcomeFriendText: '你好，我是大肥鱼的QQ机器人，直接发消息就能对话。',
+      // 单轮最多等多久（毫秒）：超时就中断这一轮并先给用户一个交代，
+      // 避免它一直空转、把后续消息堵在后面。
+      turnTimeoutMs: 90_000,
       maxChars: 1500,
       maxChunks: 4,
       includeSenderHeader: true,
@@ -116,6 +180,9 @@ export function defaultRuntimeConfig() {
       style: '口语化、简洁直接，先结论后理由。',
       rules: '回复尽量控制在 300 字内；涉及步骤时分点写。',
       useCustom: false,
+      // 可切换的人设档案（切换只换 persona，不动任何能力开关）
+      personaProfiles: DEFAULT_PERSONA_PROFILES.map((item) => ({ ...item })),
+      activePersonaId: 'default',
       custom: BASE_DEPLOYMENT_PROMPT
     },
     capabilities: {
@@ -256,6 +323,7 @@ export function normalizeRuntimeConfig(raw) {
       ackText: str(bot.ackText, base.bot.ackText),
       welcomeGroupText: str(bot.welcomeGroupText, base.bot.welcomeGroupText),
       welcomeFriendText: str(bot.welcomeFriendText, base.bot.welcomeFriendText),
+      turnTimeoutMs: int(bot.turnTimeoutMs, base.bot.turnTimeoutMs ?? 90_000, 15_000, 600_000),
       maxChars: int(bot.maxChars, base.bot.maxChars, 200, 4000),
       maxChunks: int(bot.maxChunks, base.bot.maxChunks, 1, 4),
       includeSenderHeader: bool(bot.includeSenderHeader, base.bot.includeSenderHeader),
@@ -266,6 +334,8 @@ export function normalizeRuntimeConfig(raw) {
       name: str(persona.name, base.persona.name),
       role: str(persona.role, base.persona.role),
       style: str(persona.style, base.persona.style),
+      personaProfiles: profileList(persona.personaProfiles, base.persona.personaProfiles),
+      activePersonaId: str(persona.activePersonaId, base.persona.activePersonaId),
       rules: str(persona.rules, base.persona.rules),
       useCustom: bool(persona.useCustom, base.persona.useCustom),
       custom: str(persona.custom, base.persona.custom)

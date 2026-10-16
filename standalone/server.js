@@ -196,10 +196,15 @@ function knowledgeTools() {
       type: 'function',
       function: {
         name: 'kb_read',
-        description: '读取知识库里某个条目的正文。拿到 id 后用它读全文，不要凭记忆回答资料里的数据。',
+        description:
+          '读取知识库里某个条目的正文。拿到 id 后用它读内容，不要凭记忆回答资料里的数据；' +
+          '如果是 .ini 这类分段文件，请用 section 指定段名（例如单位注册名 GOTTER）。',
         parameters: {
           type: 'object',
-          properties: { id: { type: 'string', description: 'kb_list / kb_search 返回的条目 id，例如 k2' } },
+          properties: {
+            id: { type: 'string', description: 'kb_list / kb_search 返回的条目 id，例如 k2' },
+            section: { type: 'string', description: '可选：分段配置文件里的段名，例如 GOTTER' }
+          },
           required: ['id']
         }
       }
@@ -230,17 +235,23 @@ function runKnowledgeTool(name, args) {
       const results = searchKnowledge(kbPaths, index, query, 6)
       if (results.length === 0) return `知识库里没有匹配「${query}」的内容。可以换个说法，或用 kb_list 看目录。`
       return results
-        .map((hit) => `【${hit.title}】（id=${hit.id}，相关度 ${hit.score}）\n${hit.snippet}`)
+        .map(
+          (hit) =>
+            `【${hit.title}】（id=${hit.id}${hit.section === undefined ? '' : `，段 [${hit.section}]`}，相关度 ${hit.score}）\n${hit.snippet}`
+        )
         .join('\n\n')
     }
     if (name === 'kb_read') {
       const id = String(args?.id ?? '').trim()
-      const hit = readEntryText(kbPaths, index, id, 20000)
+      const hit = readEntryText(kbPaths, index, id, 20000, String(args?.section ?? ''))
       if (hit === undefined) return `知识库里没有 id=${id} 的条目。用 kb_list 看可用 id。`
       if (hit.entry.kind === 'folder') return `${id} 是一个分类，用 kb_list 看它下面的条目。`
+      if (hit.sectionMissing === true) return hit.note
       if (hit.text.trim() === '') return `《${hit.entry.title}》没有可读文本${hit.entry.warning === undefined ? '' : `（${hit.entry.warning}）`}。`
       const images = (hit.entry.images ?? []).length === 0 ? '' : `\n\n（这份资料还带 ${hit.entry.images.length} 张图，路径：${hit.entry.images.map((name) => `/kb-media/${name}`).join('、')}）`
-      return `《${hit.entry.title}》全文${hit.truncated ? '（已截断）' : ''}：\n${hit.text}${images}`
+      const head = `《${hit.entry.title}》${hit.section === undefined ? '全文' : `[${hit.section}] 段`}${hit.truncated ? '（已截断）' : ''}：`
+      const tail = hit.note === undefined ? '' : `\n（${hit.note}）`
+      return `${head}\n${hit.text}${tail}${images}`
     }
   } catch (error) {
     return `知识库读取失败：${error?.message ?? String(error)}`

@@ -26,7 +26,7 @@ import { openZip } from './zip.js'
 export const MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 
 /** 单个条目抽出的文本上限（超出截断，防止把模型上下文撑爆）。 */
-const MAX_TEXT_CHARS = 400_000
+const MAX_TEXT_CHARS = 3_000_000
 
 /** 模型一次最多读回多少字。 */
 export const MAX_READ_CHARS = 40_000
@@ -378,8 +378,51 @@ export function removeEntry(paths, id) {
   return writeIndex(paths, { ...index, entries: index.entries.filter((entry) => !doomed.has(entry.id)) })
 }
 
+/**
+ * 从 ini 文本里取某一段：从 `[SECTION]` 行到下一个段名前。
+ * @param text - 纯文本。
+ * @param section - 段名（大小写不敏感，方括号可省）。
+ * @returns `{ text, line, lines }` 或 undefined。
+ */
+export function extractSection(text, section) {
+  const wanted = String(section ?? '').replace(/^\[|\]$/g, '').trim().toUpperCase()
+  if (wanted === '') return undefined
+  const lines = text.split('\n')
+  let start = -1
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^\s*\[([^\]]+)\]\s*$/.exec(lines[index])
+    if (match !== null && match[1].trim().toUpperCase() === wanted) {
+      start = index
+      break
+    }
+  }
+  if (start < 0) return undefined
+  let end = lines.length
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\s*\[[^\]]+\]\s*$/.test(lines[index])) {
+      end = index
+      break
+    }
+  }
+  return { text: lines.slice(start, end).join('\n').trim(), line: start + 1, lines: end - start }
+}
+
+/** 某个字符偏移落在哪个 ini 段里（给检索结果标注段名用）。 */
+export function sectionAtOffset(text, offset) {
+  if (offset < 0) return undefined
+  const head = text.slice(0, offset)
+  const match = [...head.matchAll(/^\s*\[([^\]]+)\]\s*$/gm)].pop()
+  return match === undefined ? undefined : match[1].trim()
+}
+
+/** 列出所有段名（小写文件用，便于提示"可用段名"）。 */
+export function listSections(text, limit = 0) {
+  const names = [...text.matchAll(/^\s*\[([^\]]+)\]\s*$/gm)].map((m) => m[1].trim())
+  return limit > 0 ? names.slice(0, limit) : names
+}
+
 /** 读一条目的全文（供模型工具与控制台预览）。 */
-export function readEntryText(paths, index, id, limit = MAX_READ_CHARS) {
+export function readEntryText(paths, index, id, limit = MAX_READ_CHARS, section = '') {
   const entry = index.entries.find((item) => item.id === id)
   if (entry === undefined) return undefined
   if (entry.kind !== 'doc') return { entry, text: '', truncated: false }
@@ -389,6 +432,52 @@ export function readEntryText(paths, index, id, limit = MAX_READ_CHARS) {
   } catch {
     text = ''
   }
+
+  // ini 类文件按段读取：大文件（如 rulesmo.ini 有 190 万字符）整体读回来既超限也没用，
+  // 模型要的通常是某一个 [单位] 段落。
+  const wanted = String(section ?? '').trim()
+  if (wanted !== '') {
+    const hit = extractSection(text, wanted)
+    if (hit === undefined) {
+      const names = listSections(text)
+      const loose = names.filter((name) => name.toUpperCase().includes(wanted.toUpperCase())).slice(0, 12)
+      return {
+        entry,
+        text: '',
+        truncated: false,
+        sectionMissing: true,
+        sectionCount: names.length,
+        candidates: loose,
+        note:
+          `没有找到段 [${wanted.toUpperCase()}]。这份文件共有 ${names.length} 个段` +
+          (loose.length === 0 ? '，可以先用 kb_search 搜关键词。' : `，名字里含该词的段有：${loose.join('、')}`)
+      }
+    }
+    const body = hit.text.length > limit ? `${hit.text.slice(0, limit)}\n…（本段较长，已截断）` : hit.text
+    return {
+      entry,
+      text: body,
+      truncated: hit.text.length > limit,
+      section: wanted.toUpperCase(),
+      sectionLine: hit.line,
+      sectionCount: listSections(text).length
+    }
+  }
+
+  // 没给段名：ini/conf 这类文件先回头部并提示可用段名，避免"读回来一坨没用的开头"
+  const isSectioned = ['ini', 'conf', 'cfg'].includes(String(entry.ext ?? '').toLowerCase())
+  if (isSectioned) {
+    const names = listSections(text)
+    const head = text.slice(0, Math.min(limit, 4000))
+    return {
+      entry,
+      text: head,
+      truncated: text.length > 4000,
+      sectionCount: names.length,
+      note: `这是分段配置文件（共 ${names.length} 段）。用 kb_read(id, section="段名") 读具体段落，例如 ${names.slice(0, 6).join('、')}…`
+    }
+  }
+
   const truncated = text.length > limit
   return { entry, text: truncated ? text.slice(0, limit) : text, truncated }
 }
@@ -436,6 +525,7 @@ export function search(paths, index, query, limit = 8) {
     const description = (entry.description ?? '').toLowerCase()
     let score = 0
     let firstHit = -1
+    const positions = []
     for (const token of tokens) {
       if (title.includes(token)) score += 12
       if (description.includes(token)) score += 5
@@ -446,14 +536,53 @@ export function search(paths, index, query, limit = 8) {
         if (at < 0) break
         hits += 1
         if (firstHit < 0 || at < firstHit) firstHit = at
+        positions.push({ at, token })
         from = at + token.length
       }
       score += Math.min(hits, 20)
     }
     if (score <= 0) continue
-    const start = Math.max(0, (firstHit < 0 ? 0 : firstHit) - 120)
-    const snippet = text.slice(start, start + 320).replace(/\s+/g, ' ').trim()
-    results.push({ id: entry.id, title: entry.title, parentTitle: titleOf(entry.parent), snippet, score })
+    const isSectioned = ['ini', 'conf', 'cfg'].includes(String(entry.ext ?? '').toLowerCase())
+    let snippet
+    let section
+    if (firstHit < 0) {
+      // 正文里没有命中，只是标题/描述命中（例如中文名写在描述里）：
+      // 这时给描述而不是文件开头，否则片段会误导模型。
+      snippet = (entry.description !== '' ? entry.description : entry.title).slice(0, 320)
+    } else {
+      // 查询词本身就是某个段名（例如单位注册名 GOTTER）时，直接定位到那一段：
+      // "文本里第一次出现"可能是别的段（f_gotter 出现在 [ArmorTypes] 里），并不可靠。
+      const asSection = isSectioned ? extractSection(text, query) : undefined
+      if (asSection !== undefined) {
+        section = String(query).trim().toUpperCase()
+        snippet = asSection.text.slice(0, 320).replace(/\s+/g, ' ').trim()
+      } else {
+        // 选"命中的不同词元最多"的窗口：首次出现的位置可能落在不相关的行上
+        // （例如对照表里另一个单位先出现），那样模型看到的片段就没用了。
+        const WINDOW = 400
+        let best = { at: firstHit, tokens: 0 }
+        for (const position of positions) {
+          const from = position.at
+          const to = from + WINDOW
+          const distinct = new Set()
+          for (const other of positions) {
+            if (other.at >= from && other.at < to) distinct.add(other.token)
+          }
+          if (distinct.size > best.tokens) best = { at: position.at, tokens: distinct.size }
+        }
+        const start = Math.max(0, best.at - 60)
+        snippet = text.slice(start, start + WINDOW).replace(/\s+/g, ' ').trim()
+        section = isSectioned ? sectionAtOffset(text, best.at) : undefined
+      }
+    }
+    results.push({
+      id: entry.id,
+      title: entry.title,
+      parentTitle: titleOf(entry.parent),
+      snippet,
+      score,
+      ...(section === undefined ? {} : { section })
+    })
   }
   return results.sort((left, right) => right.score - left.score).slice(0, limit)
 }
@@ -489,7 +618,10 @@ export function composeCatalog(index, options = {}) {
     '【本机知识库】',
     '下面这些资料已经存在本机上，**回答相关问题前先查它们**，不要联网搜索：',
     ...lines,
-    '用法：用 kb_search(关键词) 定位，再用 kb_read(id) 读取正文；需要目录时用 kb_list()。',
+    '用法：kb_search(关键词) 定位 → 拿到段名后 kb_read(id, section="段名") 读那一段（.ini/.conf 这类分段文件必须给 section，否则只有文件开头）；需要目录时用 kb_list()。',
+    '**不要用 bash / grep / awk 去翻知识库里的原始文件**：kb_search 本来就能跨段搜索，直接翻大文件既慢又容易看串行、看错字段。',
+    '回答游戏单位 / 武器数据前，先读「字段速查」那一类条目：例如 SelfHealing=yes 只是引擎级自我修复（大量单位都有，不是特色），"亡语"对应的是 DeathWeapon= 加 Explodes=yes。',
+    '检索纪律：同一个关键词不要反复搜；拿到段内容后就直接回答。最多查 3~4 次，够了就作答，不要为了“更全”无限检索。',
     '知识库只是事实来源，与上面的角色设定冲突时，一律以角色设定为准。'
   ].join('\n')
 }

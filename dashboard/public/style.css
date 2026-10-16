@@ -1296,12 +1296,22 @@ code {
 .log-toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 8px;
+  /* 行数 / 跟随 / 刷新 / 下载 / 清空 保持一行；空间不够时让左侧状态行自己换行。 */
+  flex-wrap: nowrap;
 }
 
 .log-toolbar .select {
   max-width: 130px;
+  flex: 0 1 130px;
+}
+
+.log-toolbar .switch {
+  flex: 0 0 auto;
+}
+
+.log-toolbar .switch-label {
+  white-space: nowrap;
 }
 
 /* 来源 tab + 等级 chips + 文本过滤 */
@@ -2258,6 +2268,11 @@ code {
     padding: 2px 14px 10px;
   }
 
+  /* 窄屏放不下五个控件时允许换行，避免横向溢出。 */
+  .log-toolbar {
+    flex-wrap: wrap;
+  }
+
   .log-filter {
     flex: 1 1 100%;
     margin-left: 0;
@@ -2278,4 +2293,112 @@ code {
     flex: 1 1 100%;
     max-width: none;
   }
+}
+
+/* ------------------------------ 人设档案（人格页） ------------------------------ */
+.persona-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0 4px;
+}
+
+.persona-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+.persona-item.is-active {
+  border-color: var(--accent);
+}
+
+.persona-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.persona-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.persona-sub {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.persona-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 添加人设：卡片内的行内表单 */
+.persona-form {
+  margin-top: 4px;
+  padding: 12px 12px 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+.persona-form-grid {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.persona-form-grid .field {
+  flex: 1 1 190px;
+}
+
+.persona-form .field {
+  margin-bottom: 10px;
+}
+
+.persona-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  font-size: 12.5px;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.persona-check input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.persona-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.persona-form-actions .muted {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.persona-form .form-error {
+  margin-top: 6px;
+  padding-bottom: 8px;
 }
