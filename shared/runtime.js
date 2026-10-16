@@ -221,7 +221,10 @@ export function defaultRuntimeConfig() {
         help: 'member',
         listPersona: 'member',
         switchPersona: 'admin',
-        status: 'member'
+        status: 'member',
+        perm: 'member',
+        claim: 'member',
+        claimCode: 'owner'
       },
       groups: {}
     },
